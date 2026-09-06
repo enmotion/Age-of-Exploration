@@ -29,6 +29,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@gltf-transform/cli": "^4.5.0",
     "@types/node": "^26.4.1",
     "@types/three": "^0.185.4",
     "@vitejs/plugin-vue": "^6.0.8",
@@ -36,6 +37,8 @@
     "eslint-plugin-vue": "^10.11.0",
     "fake-indexeddb": "^6.2.5",
     "globals": "^17.12.0",
+    "gltf-validator": "^2.0.0-dev.3.10",
+    "meshoptimizer": "^1.2.0",
     "prettier": "^3.9.6",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.69.0",

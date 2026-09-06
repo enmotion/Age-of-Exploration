@@ -163,6 +163,22 @@ p {
   width: 100%;
   height: 100%;
 }
+.camera-hint {
+  position: absolute;
+  top: 30px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 8px 12px;
+  border: 1px solid #e8efe526;
+  border-radius: 20px;
+  background: #15353a8f;
+  color: #d7e3dc;
+  font-size: 9px;
+  letter-spacing: 1px;
+  pointer-events: none;
+  backdrop-filter: blur(8px);
+  opacity: 0.78;
+}
 .sailing-vignette {
   position: absolute;
   inset: 0;
@@ -906,6 +922,9 @@ input[type='range'] {
   }
   .heading-readout {
     right: 20px;
+  }
+  .camera-hint {
+    top: 74px;
   }
   .statusbar {
     padding: 0 16px 16px;

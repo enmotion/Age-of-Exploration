@@ -59,5 +59,6 @@ onBeforeUnmount(() => {
       ><strong>{{ Math.round(game.telemetry.heading).toString().padStart(3, '0') }}°</strong
       ><small>N · E · S · W</small>
     </div>
+    <div v-if="!failed" class="camera-hint">拖动旋转视角 · 滚轮缩放 · 双击复位</div>
   </section>
 </template>
