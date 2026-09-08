@@ -22,18 +22,46 @@ import { createOcean } from './environment/ocean'
 import { sampleShipMotion, SHIP_DRAFT } from './environment/shipMotion'
 import { createWake } from './environment/wake'
 import { createNightLights } from './environment/nightLights'
+import { createStorm } from './environment/storm'
+import { waveScaleForWind } from './environment/waves'
+import { createFoamField } from './environment/foamField'
 
 // Visual compression only. Geographic position remains authoritative in the game.
 const VISUAL_METRES_PER_METRE = 0.003
 const rad = Math.PI / 180
+export interface GraphicsSettings {
+  renderScale: number
+  fpsLimit: 30 | 45 | 60
+  shadows: 'off' | 'low' | 'medium' | 'high'
+  reflection: 'off' | 'low' | 'high'
+  waveDetail: 'low' | 'medium' | 'high'
+  foam: boolean
+  wakeStrength: number
+  wakeTurbulence: number
+  bowFoamStrength: number
+  bowFoamWidth: number
+  foamLifetime: number
+  vegetationAnimation: boolean
+  stormEffects: boolean
+}
 export function createSailingView(
   host: HTMLElement,
-  getState: () => { vessel: VesselState; paused: boolean; docked: boolean; skySpeed: number },
+  getState: () => {
+    vessel: VesselState
+    paused: boolean
+    docked: boolean
+    skySpeed: number
+    windSpeed: number
+    windHeading: number
+    graphics: GraphicsSettings
+  },
   onAssetState?: (state: 'loading' | 'ready' | 'fallback') => void,
   onSkyTime?: (hour: number) => void,
+  onPerformance?: (fps: number) => void,
 ) {
   const renderer = new WebGLRenderer({ antialias: true, alpha: false })
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5))
+  let graphics = getState().graphics
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5) * graphics.renderScale)
   renderer.toneMapping = ACESFilmicToneMapping
   renderer.toneMappingExposure = 1.05
   renderer.shadowMap.enabled = true
@@ -78,6 +106,7 @@ export function createSailingView(
   const sunsetFog = new Color('#b97a61'),
     warmSun = new Color('#ff9e52')
   const noonSun = new Color('#fff3da')
+  const stormFog = new Color('#334a50')
   let skyHour = 15
   let skyPublishElapsed = 0
   onSkyTime?.(skyHour)
@@ -104,11 +133,15 @@ export function createSailingView(
     },
   )
   const { ocean, material: oceanMaterial } = createOcean(sunDirection, moonDirection)
+  const reflectionRender = ocean.onBeforeRender
   const nightLights = createNightLights(ship, island.group)
   oceanMaterial.uniforms.nightLights!.value = nightLights.positions
   scene.add(ocean)
+  const storm = createStorm()
+  scene.add(storm.rain, storm.spray)
   const wake = createWake()
-  scene.add(wake.mesh, wake.bow)
+  scene.add(wake.spray)
+  const foamField = createFoamField()
   ship.position.y = -SHIP_DRAFT
   const initial = getState().vessel
   const origin = { longitude: initial.longitude, latitude: initial.latitude }
@@ -126,8 +159,28 @@ export function createSailingView(
   let pointerY = 0
   let time = 0
   let previous = 0
+  let performanceStarted = 0
+  let performanceFrames = 0
   let active = true
   let disposed = false
+  function applyGraphics(next: GraphicsSettings) {
+    graphics = next
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5) * next.renderScale)
+    renderer.shadowMap.enabled = next.shadows !== 'off'
+    sunlight.castShadow = next.shadows !== 'off'
+    const shadowSize = { off: 512, low: 512, medium: 1024, high: 2048 }[next.shadows]
+    if (sunlight.shadow.mapSize.x !== shadowSize) {
+      sunlight.shadow.mapSize.set(shadowSize, shadowSize)
+      sunlight.shadow.map?.dispose()
+      sunlight.shadow.map = null
+    }
+    ocean.onBeforeRender = next.reflection === 'off' ? () => undefined : reflectionRender
+    oceanMaterial.uniforms.reflectionStrength!.value =
+      next.reflection === 'off' ? 0 : next.reflection === 'low' ? 0.55 : 1
+    oceanMaterial.uniforms.detailLevel!.value = { low: 0, medium: 0.5, high: 1 }[next.waveDetail]
+    oceanMaterial.uniforms.foamEnabled!.value = next.foam ? 1 : 0
+    resize()
+  }
   function resize() {
     if (disposed || !host.clientWidth || !host.clientHeight) return
     renderer.setSize(host.clientWidth, host.clientHeight)
@@ -184,13 +237,13 @@ export function createSailingView(
       previous = 0
       return
     }
-    if (previous && now - previous < 1000 / 60 - 1) return
+    if (previous && now - previous < 1000 / graphics.fpsLimit - 1) return
     const delta = Math.min(previous ? (now - previous) / 1000 : 0, 0.1)
     previous = now
-    const { vessel, paused, docked, skySpeed } = getState()
+    const { vessel, paused, docked, skySpeed, windSpeed, windHeading } = getState()
     const dt = paused ? 0 : delta
     time += dt
-    island.update(time)
+    if (graphics.vegetationAnimation) island.update(time)
     skyHour = advanceDay(skyHour, dt, skySpeed)
     skyPublishElapsed += delta
     if (skyPublishElapsed >= 0.15) {
@@ -213,7 +266,23 @@ export function createSailingView(
     )
     fog.color.copy(nightFog).lerp(dayFog, daylight)
     fog.color.lerp(sunsetFog, daylight * Math.max(0, 1 - Math.abs(sunDirection.y) * 3.5) * 0.65)
-    renderer.toneMappingExposure = 1.05 + (1 - daylight) * 0.25
+    const stormStrength = storm.update(
+      time,
+      windSpeed,
+      windHeading,
+      graphics.stormEffects,
+      graphics.foam,
+      { low: 0.3, medium: 0.62, high: 1 }[graphics.waveDetail],
+      position.x,
+      position.y,
+      daylight,
+      camera.position.x,
+      camera.position.z,
+    )
+    fog.color.lerp(stormFog, stormStrength * 0.72)
+    fog.near = 400 - stormStrength * 290
+    fog.far = 1300 - stormStrength * 820
+    renderer.toneMappingExposure = 1.05 + (1 - daylight) * 0.25 - stormStrength * 0.18
     sky.material.uniforms.daylight!.value = daylight
     sky.material.uniforms.time!.value = time
     oceanMaterial.uniforms.daylight!.value = daylight
@@ -240,7 +309,12 @@ export function createSailingView(
       cameraInterpolation
     orbitElevation += (targetElevation - orbitElevation) * cameraInterpolation
     orbitDistance += (targetDistance - orbitDistance) * cameraInterpolation
-    const motion = sampleShipMotion(position.x, position.y, heading, time)
+    const waveScale = waveScaleForWind(windSpeed)
+    const seaViolence = Math.min(1, Math.max(0, (windSpeed - 12) / 18))
+    oceanMaterial.uniforms.waveScale!.value = waveScale
+    oceanMaterial.uniforms.windAngle!.value = windHeading * rad
+    oceanMaterial.uniforms.waveChoppiness!.value = 0.2 + seaViolence * 1.05
+    const motion = sampleShipMotion(position.x, position.y, heading, time, waveScale, windHeading)
     const buoyancy = 1 - Math.exp(-dt * 4)
     ship.rotation.order = 'YXZ'
     ship.rotation.y = -heading
@@ -261,10 +335,53 @@ export function createSailingView(
     camera.lookAt(0, 8 + Math.min(5, orbitDistance * 0.035), 0)
     oceanMaterial.uniforms.time!.value = time
     oceanMaterial.uniforms.offset!.value.set(position.x, position.y)
-    wake.update(position.x, position.y, heading, vessel.speed, time, daylight, docked)
+    wake.update(
+      position.x,
+      position.y,
+      heading,
+      vessel.speed,
+      time,
+      daylight,
+      docked,
+      waveScale,
+      windHeading,
+      graphics.foam,
+      { low: 0.35, medium: 0.65, high: 1 }[graphics.waveDetail],
+      graphics.wakeStrength,
+      graphics.wakeTurbulence,
+    )
+    foamField.update(
+      renderer,
+      position.x,
+      position.y,
+      heading,
+      vessel.speed,
+      dt,
+      time,
+      wake.getHistory(),
+      graphics.foam,
+      graphics.wakeStrength,
+      graphics.bowFoamStrength,
+      graphics.bowFoamWidth,
+      graphics.foamLifetime,
+      graphics.wakeTurbulence,
+    )
+    oceanMaterial.uniforms.vesselFoam!.value = foamField.texture
+    oceanMaterial.uniforms.vesselFoamCenter!.value.copy(foamField.center)
+    oceanMaterial.uniforms.vesselFoamSize!.value = foamField.size
     renderer.render(scene, camera)
+    performanceFrames++
+    if (!performanceStarted) performanceStarted = now
+    if (now - performanceStarted >= 500) {
+      onPerformance?.((performanceFrames * 1000) / (now - performanceStarted))
+      performanceStarted = now
+      performanceFrames = 0
+    }
   })
   return {
+    setGraphics(next: GraphicsSettings) {
+      applyGraphics(next)
+    },
     setSkyHour(hour: number) {
       skyHour = ((hour % 24) + 24) % 24
       onSkyTime?.(skyHour)
@@ -291,8 +408,10 @@ export function createSailingView(
       sky.geometry.dispose()
       sky.material.dispose()
       nightLights.dispose()
+      storm.dispose()
       island.dispose()
       wake.dispose()
+      foamField.dispose()
       renderer.dispose()
       renderer.domElement.remove()
     },

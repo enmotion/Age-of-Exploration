@@ -1,4 +1,4 @@
-import { computed, ref, shallowRef } from 'vue'
+import { computed, reactive, ref, shallowRef } from 'vue'
 import { defineStore } from 'pinia'
 import { getPort, homePort, ports } from '../data/ports'
 import {
@@ -24,6 +24,7 @@ export const useGameStore = defineStore('game', () => {
   const gold = ref(2400)
   const gameHours = ref(0)
   const paused = ref(false)
+  const conditions = reactive({ ...defaultConditions })
   // Baseline is four times the original preview; acceleration changes game time, not knots.
   const travelPace = ref<1 | 4>(1)
   const ready = ref(false)
@@ -114,7 +115,7 @@ export const useGameStore = defineStore('game', () => {
   function tick(dt: number, input: SailingInput) {
     if (!ready.value || paused.value || scene.value !== 'world' || portId.value) return
     const hours = dt * travelPace.value
-    stepSailing(vessel, input, defaultConditions, dt, hours)
+    stepSailing(vessel, input, conditions, dt, hours)
     simulatedHours += hours
     publishElapsed += dt
     if (publishElapsed >= 0.1) {
@@ -160,6 +161,7 @@ export const useGameStore = defineStore('game', () => {
     gold,
     gameHours,
     paused,
+    conditions,
     travelPace,
     ready,
     saveStatus,

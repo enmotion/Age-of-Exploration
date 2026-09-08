@@ -23,6 +23,10 @@ export const defaultConditions: SailingConditions = {
   hull: 1,
   crew: 1,
 }
+
+export function windEfficiency(heading: number, windHeading: number) {
+  return 0.18 + (0.82 * (1 + Math.cos((heading - windHeading) * radians))) / 2
+}
 const radians = Math.PI / 180
 const earthRadiusNm = 3440.065
 export const clamp = (value: number, min: number, max: number) =>
@@ -49,11 +53,9 @@ export function stepSailing(
   vessel.heading = (((vessel.heading + clamp(input.rudder, -1, 1) * 35 * dt) % 360) + 360) % 360
   vessel.sail = clamp(input.sail, 0, 1)
   // Wind heading is the direction the wind travels towards.
-  const windEfficiency =
-    0.18 + (0.82 * (1 + Math.cos((vessel.heading - conditions.windHeading) * radians))) / 2
   const target =
     Math.min(10, conditions.windSpeed * 0.65) *
-    windEfficiency *
+    windEfficiency(vessel.heading, conditions.windHeading) *
     vessel.sail *
     (1 - clamp(conditions.load, 0, 1) * 0.35) *
     clamp(conditions.hull, 0, 1) *

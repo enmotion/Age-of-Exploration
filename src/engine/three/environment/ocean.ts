@@ -33,12 +33,24 @@ export function createOcean(sunDirection: Vector3, moonDirection: Vector3) {
         offset: { value: new Vector2() },
         islandCenter: { value: new Vector2() },
         nightLights: { value: Array.from({ length: 4 }, () => new Vector4()) },
+        waveScale: { value: 1 },
+        reflectionStrength: { value: 1 },
+        detailLevel: { value: 1 },
+        foamEnabled: { value: 1 },
+        windAngle: { value: 0 },
+        waveChoppiness: { value: 0.25 },
+        vesselFoam: { value: null },
+        vesselFoamCenter: { value: new Vector2() },
+        vesselFoamSize: { value: 420 },
       },
       vertexShader: /* glsl */ `
         uniform float time;
         uniform vec2 offset;
         uniform vec2 islandCenter;
         uniform mat4 textureMatrix;
+        uniform float waveScale;
+        uniform float windAngle;
+        uniform float waveChoppiness;
         varying vec3 vWorld;
         varying vec4 vReflection;
         varying float vAttenuation;
@@ -47,9 +59,12 @@ export function createOcean(sunDirection: Vector3, moonDirection: Vector3) {
           vec3 p = position;
           vec2 local = vec2(p.x, -p.y);
           vec2 samplePoint = local + offset;
-          vec4 field = waveField(samplePoint, time);
+          vec4 field = windWaveField(samplePoint, time, windAngle);
+          field.xyz *= waveScale;
           float shore = length((local - islandCenter) / vec2(1.0, 0.72)) - ${ISLAND_RADIUS.toFixed(1)};
           float attenuation = mix(0.12, 1.0, smoothstep(-5.0, 28.0, shore));
+          vec2 displacement = waveDisplacement(samplePoint, time, windAngle) * waveChoppiness * waveScale * attenuation;
+          p.xy += vec2(displacement.x, -displacement.y);
           p.z = field.x * attenuation;
           vAttenuation = attenuation;
           vWorld = (modelMatrix * vec4(p, 1.0)).xyz;
@@ -62,6 +77,14 @@ export function createOcean(sunDirection: Vector3, moonDirection: Vector3) {
         uniform vec4 nightLights[4];
         uniform vec2 offset;
         uniform vec2 islandCenter;
+        uniform float waveScale;
+        uniform float reflectionStrength;
+        uniform float detailLevel;
+        uniform float foamEnabled;
+        uniform float windAngle;
+        uniform sampler2D vesselFoam;
+        uniform vec2 vesselFoamCenter;
+        uniform float vesselFoamSize;
         varying vec3 vWorld;
         varying vec4 vReflection;
         varying float vAttenuation;
@@ -81,12 +104,13 @@ export function createOcean(sunDirection: Vector3, moonDirection: Vector3) {
           vec2 p = vWorld.xz + offset;
           float distanceToCamera = length(cameraPosition - vWorld);
           float detail = 1.0 - smoothstep(90.0, 420.0, distanceToCamera);
-          vec4 field = waveField(p, time);
+          vec4 field = windWaveField(p, time, windAngle);
+          field.xyz *= waveScale;
           vec2 rippleUv = p * 0.42 + vec2(time * 0.12, -time * 0.08);
           rippleUv += vec2(noise21(p * 0.08), noise21(p * 0.08 + 19.0)) * 1.3;
           float centerHeight = rippleHeight(rippleUv);
           vec2 ripple = vec2(rippleHeight(rippleUv + vec2(0.18, 0.0)) - centerHeight,
-                             rippleHeight(rippleUv + vec2(0.0, 0.18)) - centerHeight) * 0.65 * detail;
+                             rippleHeight(rippleUv + vec2(0.0, 0.18)) - centerHeight) * 0.65 * detail * detailLevel;
           vec3 normal = normalize(vec3(-field.y * vAttenuation + ripple.x, 1.0, -field.z * vAttenuation + ripple.y));
           vec3 viewDir = normalize(cameraPosition - vWorld);
           float facing = max(dot(normal, viewDir), 0.0);
@@ -111,7 +135,7 @@ export function createOcean(sunDirection: Vector3, moonDirection: Vector3) {
           reflection += texture2D(tDiffuse, clamp(reflectionUv - vec2(0.002, 0.001), 0.004, 0.996)).rgb * 0.25;
           float edge = smoothstep(0.0, 0.06, reflectionUv.x) * (1.0 - smoothstep(0.94, 1.0, reflectionUv.x));
           edge *= smoothstep(0.0, 0.06, reflectionUv.y) * (1.0 - smoothstep(0.94, 1.0, reflectionUv.y));
-          reflection = mix(skyReflection, reflection, edge * 0.9);
+          reflection = mix(skyReflection, reflection, edge * 0.9 * reflectionStrength);
           vec3 color = mix(water, reflection, clamp(fresnel, 0.035, 0.92));
           float sunVisible = smoothstep(-0.025, 0.08, sunDirection.y);
           vec3 solarColor = mix(vec3(1.0, 0.3, 0.07), vec3(1.0, 0.9, 0.69), smoothstep(0.0, 0.45, sunDirection.y));
@@ -135,17 +159,37 @@ export function createOcean(sunDirection: Vector3, moonDirection: Vector3) {
           float coverage = noise21(foamUv * 0.065 + 12.0);
           float threshold = mix(0.57, 0.83, coverage);
           float fresh = smoothstep(threshold, threshold + 0.18, field.w);
-          float remnant = smoothstep(threshold, threshold + 0.18, previousCrest(p - drift * 0.7, time - 0.7)) * 0.5;
-          remnant = max(remnant, smoothstep(threshold, threshold + 0.18, previousCrest(p - drift * 1.5, time - 1.5)) * 0.2);
+          float remnant = smoothstep(threshold, threshold + 0.18, previousCrest(rotateWave(p - drift * 0.7, -windAngle), time - 0.7)) * 0.5;
+          remnant = max(remnant, smoothstep(threshold, threshold + 0.18, previousCrest(rotateWave(p - drift * 1.5, -windAngle), time - 1.5)) * 0.2);
           float cellular = noise21(foamUv * mix(0.85, 3.2, detail) + foamNoise * 1.2);
           float threads = 1.0 - smoothstep(0.035, 0.16, abs(cellular - 0.5));
           float foamBreakup = smoothstep(0.32, 0.6, noise21(foamUv * 0.23 + vec2(foamNoise, 0.0)));
           float whitecap = max(fresh, remnant) * foamBreakup * (0.08 + threads * 0.92);
           whitecap *= smoothstep(0.25, 0.9, vAttenuation) * (1.0 - smoothstep(240.0, 650.0, distanceToCamera));
-          foam = max(foam, whitecap * 0.72);
-          vec3 foamLight = mix(vec3(0.075, 0.11, 0.17), vec3(0.64, 0.75, 0.79), daylight);
+          vec2 vesselFoamUv = (p - vesselFoamCenter) / vesselFoamSize + 0.5;
+          float vesselFoamBounds = step(0.0, vesselFoamUv.x) * step(vesselFoamUv.x, 1.0) *
+            step(0.0, vesselFoamUv.y) * step(vesselFoamUv.y, 1.0);
+          vec2 vesselLayers = texture2D(vesselFoam, clamp(vesselFoamUv, 0.0, 1.0)).rg * vesselFoamBounds;
+          float wakeTrail = 1.0 - exp(-vesselLayers.r * 0.72);
+          float wakeChurn = 1.0 - exp(-vesselLayers.g * 0.58);
+          float wakeGrain = noise21(p * 0.31 + vec2(4.7, -2.1));
+          float wakeFine = noise21(p * 1.37 + wakeGrain * 2.4);
+          float wakeIslands = smoothstep(0.32, 0.68, wakeGrain * 0.7 + wakeFine * 0.42);
+          float wakeThreads = 1.0 - smoothstep(0.045, 0.17, abs(wakeFine - 0.5));
+          wakeTrail *= max(wakeIslands * 0.48, wakeThreads * wakeGrain * 0.72);
+          wakeChurn *= max(wakeIslands * wakeFine, wakeThreads * 0.38);
+          float vesselWake = max(wakeTrail, wakeChurn);
+          foam = max(max(foam, whitecap * 0.72), vesselWake) * foamEnabled;
+          // Foam is not emissive: daylight controls both its reflected colour and how
+          // strongly it can replace the underlying water. Keep only a weak moonlit
+          // response at night so the mask remains readable without glowing.
+          float foamIllumination = mix(0.16, 1.0, smoothstep(0.04, 0.82, daylight));
+          vec3 foamLight = mix(vec3(0.095, 0.13, 0.17), vec3(0.64, 0.75, 0.79), daylight);
           foamLight += solarColor * max(dot(normal, sunDirection), 0.0) * 0.22 * sunVisible;
-          color = mix(color, foamLight, clamp(foam, 0.0, 0.9));
+          foamLight += vec3(0.12, 0.17, 0.25) * max(dot(normal, moonDirection), 0.0) *
+            0.12 * (1.0 - daylight);
+          // Surface foam is the thin wet base; elevated crest spray supplies the volume.
+          color = mix(color, foamLight, clamp(foam * 0.68 * foamIllumination, 0.0, 0.64));
           float haze = 1.0 - exp(-distanceToCamera * distanceToCamera * 0.00000065);
           color = mix(color, atmosphere(normalize(vec3(viewDir.x * -1.0, 0.015, viewDir.z * -1.0))), haze * 0.86);
           gl_FragColor = vec4(color, 1.0);
