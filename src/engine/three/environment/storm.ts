@@ -8,7 +8,9 @@ import {
 } from 'three'
 import { wavesGLSL, waveScaleForWind } from './waves'
 
-const MAX_DROPS = 2200
+// Rain is GPU-wrapped in a camera-local volume, so a denser field has negligible
+// CPU cost. Quality presets still reduce the actual draw range in update().
+const MAX_DROPS = 12000
 const SPRAY_CLUSTERS = 192
 const SPRAY_PER_CLUSTER = 48
 const MAX_SPRAY = SPRAY_CLUSTERS * SPRAY_PER_CLUSTER
@@ -50,7 +52,7 @@ export function createStorm() {
         p.xz += wind * (100.0 - p.y) * strength * 0.24;
         vec4 mv = modelViewMatrix * vec4(p, 1.0);
         gl_Position = projectionMatrix * mv;
-        gl_PointSize = mix(1.0, 2.2, strength) * (110.0 / max(25.0, -mv.z));
+        gl_PointSize = mix(2.4, 7.2, strength) * (115.0 / max(25.0, -mv.z));
         vAlpha = strength * (1.0 - smoothstep(18.0, 100.0, length(p.xz)));
       }
     `,
@@ -58,10 +60,12 @@ export function createStorm() {
       varying float vAlpha;
       void main() {
         vec2 q = gl_PointCoord - 0.5;
-        float streak = (1.0 - smoothstep(0.0, 0.16, abs(q.x))) *
-          (1.0 - smoothstep(0.15, 0.5, abs(q.y)));
+        // A narrow core across the drop and a long, softly tapered tail along it.
+        float streak = (1.0 - smoothstep(0.025, 0.105, abs(q.x))) *
+          (1.0 - smoothstep(0.34, 0.5, abs(q.y)));
+        streak *= mix(0.42, 1.0, smoothstep(-0.5, 0.34, q.y));
         if (streak <= 0.01) discard;
-        gl_FragColor = vec4(0.63, 0.78, 0.86, streak * vAlpha * 0.72);
+        gl_FragColor = vec4(0.63, 0.78, 0.86, streak * vAlpha * 0.62);
         #include <tonemapping_fragment>
         #include <colorspace_fragment>
       }

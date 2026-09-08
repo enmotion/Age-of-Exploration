@@ -178,7 +178,9 @@ export function createOcean(sunDirection: Vector3, moonDirection: Vector3) {
           float wakeThreads = 1.0 - smoothstep(0.045, 0.17, abs(wakeFine - 0.5));
           wakeTrail *= max(wakeIslands * 0.48, wakeThreads * wakeGrain * 0.72);
           wakeChurn *= max(wakeIslands * wakeFine, wakeThreads * 0.38);
-          float vesselWake = max(wakeTrail, wakeChurn);
+          // Vessel-authored surface foam is deliberately stronger than ambient
+          // whitecaps; lighting below still keeps it subdued after dark.
+          float vesselWake = max(wakeTrail, wakeChurn) * 2.0;
           foam = max(max(foam, whitecap * 0.72), vesselWake) * foamEnabled;
           // Foam is not emissive: daylight controls both its reflected colour and how
           // strongly it can replace the underlying water. Keep only a weak moonlit
