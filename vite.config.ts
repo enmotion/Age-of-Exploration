@@ -4,7 +4,7 @@ import { templateCompilerOptions } from '@tresjs/core'
 
 export default defineConfig({
   plugins: [vue(templateCompilerOptions)],
-  server: { port: 5173, strictPort: true },
+  server: { port: 5173, strictPort: false },
   test: { environment: 'node', include: ['src/**/*.test.ts'] },
   build: {
     rollupOptions: {

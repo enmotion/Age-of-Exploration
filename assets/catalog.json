@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "assets": [
+    {
+      "id": "ship.player.caravel",
+      "kind": "model",
+      "source": "assets/source/ships/caravel/caravel-pbr.glb",
+      "output": "public/assets/models/ships/caravel.glb",
+      "url": "/assets/models/ships/caravel.glb",
+      "licenseId": "CC0-1.0 + project-generated-textures",
+      "sourceUrl": "https://kenney.nl/assets/pirate-kit",
+      "maxBytes": 2500000,
+      "transform": { "scale": 2.7, "rotationY": 3.141592653589793, "waterlineY": 0 }
+    },
+    {
+      "id": "port.dock.large",
+      "kind": "model",
+      "source": "assets/vendor/kenney-pirate-kit/Models/GLB format/structure-platform-dock.glb",
+      "output": "public/assets/models/ports/dock-large.glb",
+      "url": "/assets/models/ports/dock-large.glb",
+      "licenseId": "CC0-1.0",
+      "sourceUrl": "https://kenney.nl/assets/pirate-kit",
+      "maxBytes": 100000
+    },
+    {
+      "id": "prop.barrel",
+      "kind": "model",
+      "source": "assets/vendor/kenney-pirate-kit/Models/GLB format/barrel.glb",
+      "output": "public/assets/models/props/barrel.glb",
+      "url": "/assets/models/props/barrel.glb",
+      "licenseId": "CC0-1.0",
+      "sourceUrl": "https://kenney.nl/assets/pirate-kit",
+      "maxBytes": 50000
+    },
+    {
+      "id": "prop.crate",
+      "kind": "model",
+      "source": "assets/vendor/kenney-pirate-kit/Models/GLB format/crate.glb",
+      "output": "public/assets/models/props/crate.glb",
+      "url": "/assets/models/props/crate.glb",
+      "licenseId": "CC0-1.0",
+      "sourceUrl": "https://kenney.nl/assets/pirate-kit",
+      "maxBytes": 50000
+    },
+    {
+      "id": "prop.cannon",
+      "kind": "model",
+      "source": "assets/vendor/kenney-pirate-kit/Models/GLB format/cannon.glb",
+      "output": "public/assets/models/props/cannon.glb",
+      "url": "/assets/models/props/cannon.glb",
+      "licenseId": "CC0-1.0",
+      "sourceUrl": "https://kenney.nl/assets/pirate-kit",
+      "maxBytes": 50000
+    }
+  ]
+}

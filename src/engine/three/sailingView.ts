@@ -1,33 +1,36 @@
 import {
   ACESFilmicToneMapping,
-  AmbientLight,
-  BackSide,
-  CanvasTexture,
   Color,
   DirectionalLight,
   Fog,
+  Group,
   HemisphereLight,
-  Mesh,
-  MeshBasicMaterial,
   PerspectiveCamera,
   PCFSoftShadowMap,
-  PlaneGeometry,
   Scene,
-  ShaderMaterial,
-  SphereGeometry,
   Vector2,
   Vector3,
   WebGLRenderer,
 } from 'three'
 import type { VesselState } from '../../game/sailing/sailing'
+import { instantiateModel } from '../assets/modelAssets'
 import { createShip, disposeShip } from './ship'
+import { createAtmosphere } from './environment/atmosphere'
+import { advanceDay, daylightAt } from './environment/dayCycle'
+import { createIsland } from './environment/island'
+import { createOcean } from './environment/ocean'
+import { sampleShipMotion, SHIP_DRAFT } from './environment/shipMotion'
+import { createWake } from './environment/wake'
+import { createNightLights } from './environment/nightLights'
 
 // Visual compression only. Geographic position remains authoritative in the game.
 const VISUAL_METRES_PER_METRE = 0.003
 const rad = Math.PI / 180
 export function createSailingView(
   host: HTMLElement,
-  getState: () => { vessel: VesselState; paused: boolean; docked: boolean },
+  getState: () => { vessel: VesselState; paused: boolean; docked: boolean; skySpeed: number },
+  onAssetState?: (state: 'loading' | 'ready' | 'fallback') => void,
+  onSkyTime?: (hour: number) => void,
 ) {
   const renderer = new WebGLRenderer({ antialias: true, alpha: false })
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5))
@@ -41,244 +44,80 @@ export function createSailingView(
   renderer.domElement.style.cursor = 'grab'
   host.append(renderer.domElement)
   const scene = new Scene()
-  scene.background = new Color('#9bbdc0')
-  scene.fog = new Fog('#9bbdc0', 420, 1050)
-  const camera = new PerspectiveCamera(42, 1, 0.5, 2000)
-  scene.add(new AmbientLight('#b8d0d0', 0.18))
-  scene.add(new HemisphereLight('#b9dce5', '#172722', 1.25))
-  const sunDirection = new Vector3(-0.42, 0.53, -0.74).normalize()
-  const sunlight = new DirectionalLight('#ffd79b', 4.8)
-  sunlight.position.copy(sunDirection).multiplyScalar(190)
+  const fog = new Fog('#a1c5da', 400, 1300)
+  scene.fog = fog
+  const camera = new PerspectiveCamera(48, 1, 0.5, 3000)
+  const hemisphere = new HemisphereLight('#c3e4ff', '#494839', 1.6)
+  scene.add(hemisphere)
+  const sunDirection = new Vector3()
+  const moonDirection = new Vector3()
+  const sunlight = new DirectionalLight('#fff0ce', 3)
   sunlight.castShadow = true
-  sunlight.shadow.mapSize.set(1024, 1024)
+  sunlight.shadow.mapSize.set(2048, 2048)
   Object.assign(sunlight.shadow.camera, {
-    left: -40,
-    right: 40,
-    top: 40,
-    bottom: -40,
+    left: -200,
+    right: 200,
+    top: 200,
+    bottom: -200,
     near: 1,
-    far: 300,
+    far: 1100,
   })
   sunlight.shadow.camera.updateProjectionMatrix()
-  sunlight.shadow.normalBias = 0.15
-  scene.add(sunlight)
-  const skyMaterial = new ShaderMaterial({
-    side: BackSide,
-    depthWrite: false,
-    uniforms: { sunDirection: { value: sunDirection } },
-    vertexShader: `
-      varying vec3 vDirection;
-      void main() {
-        vDirection = normalize(position);
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-      }`,
-    fragmentShader: `
-      uniform vec3 sunDirection;
-      varying vec3 vDirection;
-
-      float hash(vec2 p) {
-        return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
-      }
-      float noise(vec2 p) {
-        vec2 i = floor(p);
-        vec2 f = fract(p);
-        f = f * f * (3.0 - 2.0 * f);
-        return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x),
-                   mix(hash(i + vec2(0.0, 1.0)), hash(i + 1.0), f.x), f.y);
-      }
-      void main() {
-        float height = clamp(vDirection.y * 0.5 + 0.5, 0.0, 1.0);
-        vec3 horizon = vec3(0.71, 0.79, 0.76);
-        vec3 zenith = vec3(0.17, 0.39, 0.49);
-        vec3 color = mix(horizon, zenith, pow(height, 0.72));
-        float sunDot = max(dot(normalize(vDirection), sunDirection), 0.0);
-        color += vec3(1.0, 0.67, 0.30) * pow(sunDot, 420.0) * 7.0;
-        color += vec3(1.0, 0.55, 0.24) * pow(sunDot, 9.0) * 0.24;
-        vec2 cloudUv = vDirection.xz / max(0.12, vDirection.y + 0.32) * 2.1;
-        float cloud = noise(cloudUv) * 0.62 + noise(cloudUv * 2.1 + 4.0) * 0.38;
-        cloud = smoothstep(0.59, 0.76, cloud) * smoothstep(-0.02, 0.3, vDirection.y);
-        color = mix(color, vec3(0.88, 0.89, 0.82), cloud * 0.35);
-        gl_FragColor = vec4(color, 1.0);
-        #include <tonemapping_fragment>
-        #include <colorspace_fragment>
-      }`,
-  })
-  const sky = new Mesh(new SphereGeometry(1200, 36, 18), skyMaterial)
+  sunlight.shadow.normalBias = 0.09
+  sunlight.shadow.bias = -0.00015
+  const moonlight = new DirectionalLight('#95baff', 0.3)
+  scene.add(sunlight, sunlight.target, moonlight)
+  const sky = createAtmosphere(sunDirection, moonDirection)
   scene.add(sky)
-  const ship = createShip()
+  const island = createIsland()
+  const islandAnchor = new Vector2(-60, 255)
+  island.group.position.set(islandAnchor.x, 0, islandAnchor.y)
+  scene.add(island.group)
+  const dayFog = new Color('#a1c5da'),
+    nightFog = new Color('#16273f')
+  const sunsetFog = new Color('#b97a61'),
+    warmSun = new Color('#ff9e52')
+  const noonSun = new Color('#fff3da')
+  let skyHour = 15
+  let skyPublishElapsed = 0
+  onSkyTime?.(skyHour)
+  const ship = new Group()
+  const fallbackShip = createShip()
+  ship.add(fallbackShip)
   scene.add(ship)
-  const sails = ship.children.filter((object) => object.name === 'sail')
-  const oceanMaterial = new ShaderMaterial({
-    uniforms: {
-      time: { value: 0 },
-      offset: { value: new Vector2() },
-      sunDirection: { value: sunDirection },
-      deepColor: { value: new Color('#062d3b') },
-      midColor: { value: new Color('#0d5964') },
-      skyColor: { value: new Color('#8fb4b5') },
-      sunColor: { value: new Color('#ffd28a') },
+  let sails = fallbackShip.children.filter((object) => object.name === 'sail')
+  let fallbackAttached = true
+  onAssetState?.('loading')
+  void instantiateModel('ship.player.caravel').then(
+    (model) => {
+      if (disposed) return
+      ship.add(model)
+      ship.remove(fallbackShip)
+      disposeShip(fallbackShip)
+      fallbackAttached = false
+      sails = []
+      onAssetState?.('ready')
     },
-    vertexShader: `
-      uniform float time;
-      uniform vec2 offset;
-      varying vec3 vWorld;
-      varying vec3 vWaveNormal;
-      varying float vHeight;
-
-      void gerstner(
-        vec2 samplePoint,
-        vec2 direction,
-        float frequency,
-        float amplitude,
-        float speed,
-        float steepness,
-        inout vec3 displaced,
-        inout vec2 slope
-      ) {
-        direction = normalize(direction);
-        float phase = dot(samplePoint, direction) * frequency + time * speed;
-        displaced.xy += direction * cos(phase) * amplitude * steepness;
-        displaced.z += sin(phase) * amplitude;
-        slope += direction * cos(phase) * frequency * amplitude;
-      }
-      void main() {
-        vec3 p = position;
-        vec2 w = p.xy + offset;
-        vec2 slope = vec2(0.0);
-        gerstner(w, vec2(1.0, 0.28), 0.028, 1.24, 0.72, 0.48, p, slope);
-        gerstner(w, vec2(-0.24, 1.0), 0.047, 0.73, 0.91, 0.40, p, slope);
-        gerstner(w, vec2(0.76, -0.55), 0.083, 0.36, 1.22, 0.32, p, slope);
-        gerstner(w, vec2(-0.86, -0.21), 0.145, 0.16, 1.68, 0.22, p, slope);
-        gerstner(w, vec2(0.18, 1.0), 0.255, 0.055, 2.35, 0.10, p, slope);
-        vHeight = p.z;
-        vec3 localNormal = normalize(vec3(-slope.x, -slope.y, 1.0));
-        vWaveNormal = normalize(mat3(modelMatrix) * localNormal);
-        vec4 world = modelMatrix * vec4(p, 1.);
-        vWorld = world.xyz;
-        gl_Position = projectionMatrix * viewMatrix * world;
-      }`,
-    fragmentShader: `
-      uniform float time;
-      uniform vec2 offset;
-      uniform vec3 sunDirection;
-      uniform vec3 deepColor;
-      uniform vec3 midColor;
-      uniform vec3 skyColor;
-      uniform vec3 sunColor;
-      varying vec3 vWorld;
-      varying vec3 vWaveNormal;
-      varying float vHeight;
-
-      float hash(vec2 p) {
-        return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
-      }
-      float noise(vec2 p) {
-        vec2 i = floor(p);
-        vec2 f = fract(p);
-        f = f * f * (3.0 - 2.0 * f);
-        return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x),
-                   mix(hash(i + vec2(0.0, 1.0)), hash(i + 1.0), f.x), f.y);
-      }
-      float fbm(vec2 p) {
-        float value = 0.0;
-        float amplitude = 0.5;
-        mat2 rotation = mat2(0.80, -0.60, 0.60, 0.80);
-        for (int i = 0; i < 4; i++) {
-          value += amplitude * noise(p);
-          p = rotation * p * 2.03 + 9.17;
-          amplitude *= 0.5;
-        }
-        return value;
-      }
-      void main() {
-        vec2 p = vWorld.xz + offset;
-        float microA = fbm(p * 0.095 + vec2(time * 0.07, -time * 0.11));
-        float microB = fbm((p + vec2(1.7, -2.9)) * 0.095 + vec2(time * 0.07, -time * 0.11));
-        vec3 normal = normalize(vWaveNormal + vec3((microA - 0.5) * 0.18, 0.0, (microB - 0.5) * 0.18));
-        vec3 viewDirection = normalize(cameraPosition - vWorld);
-        vec3 halfDirection = normalize(viewDirection + sunDirection);
-        float facing = clamp(dot(normal, viewDirection), 0.0, 1.0);
-        float fresnel = 0.018 + 0.982 * pow(1.0 - facing, 5.0);
-        float diffuse = clamp(dot(normal, sunDirection) * 0.5 + 0.5, 0.0, 1.0);
-        float roughnessNoise = mix(0.68, 1.0, microA);
-        float specular = pow(max(dot(normal, halfDirection), 0.0), 210.0 * roughnessNoise);
-        float broadSpecular = pow(max(dot(normal, halfDirection), 0.0), 26.0) * 0.11;
-        float trough = clamp(vHeight * 0.11 + diffuse * 0.30 + 0.38, 0.0, 1.0);
-        vec3 water = mix(deepColor, midColor, trough);
-        vec3 reflectedSky = mix(vec3(0.10, 0.29, 0.36), skyColor, clamp(normal.y * 0.67, 0.0, 1.0));
-        vec3 color = mix(water, reflectedSky, fresnel * 0.48);
-        color += sunColor * (specular * 3.6 + broadSpecular);
-        float backLight = pow(max(dot(viewDirection, -sunDirection), 0.0), 3.0);
-        color += vec3(0.02, 0.24, 0.20) * backLight * (1.0 - normal.y) * 0.42;
-        float crestNoise = fbm(p * 0.08 + vec2(time * 0.08, -time * 0.055));
-        float steep = 1.0 - normal.y;
-        float foam = smoothstep(1.14, 1.72, vHeight + crestNoise * 0.48 + steep * 2.1);
-        float brokenFoam = smoothstep(0.46, 0.72, fbm(p * 0.22 - time * 0.035));
-        foam *= mix(0.38, 1.0, brokenFoam);
-        color = mix(color, vec3(0.72, 0.87, 0.82), foam * 0.72);
-        float distanceToCamera = length(cameraPosition - vWorld);
-        float horizonFog = 1.0 - exp(-distanceToCamera * distanceToCamera * 0.0000019);
-        color = mix(color, skyColor, clamp(horizonFog, 0.0, 0.88));
-        gl_FragColor = vec4(color, 1.0);
-        #include <tonemapping_fragment>
-        #include <colorspace_fragment>
-      }`,
-  })
-  const ocean = new Mesh(new PlaneGeometry(2200, 2200, 190, 190), oceanMaterial)
-  ocean.rotation.x = -Math.PI / 2
+    (error: unknown) => {
+      console.warn('Could not load the caravel asset; using the procedural fallback.', error)
+      if (!disposed) onAssetState?.('fallback')
+    },
+  )
+  const { ocean, material: oceanMaterial } = createOcean(sunDirection, moonDirection)
+  const nightLights = createNightLights(ship, island.group)
+  oceanMaterial.uniforms.nightLights!.value = nightLights.positions
   scene.add(ocean)
-  const wakeCanvas = document.createElement('canvas')
-  wakeCanvas.width = 128
-  wakeCanvas.height = 128
-  const wakeContext = wakeCanvas.getContext('2d')
-  if (!wakeContext) throw new Error('Canvas 2D is required for the wake texture')
-  wakeContext.clearRect(0, 0, 128, 128)
-  const wakeGradient = wakeContext.createRadialGradient(64, 64, 5, 64, 64, 58)
-  wakeGradient.addColorStop(0, 'rgba(235,255,248,.8)')
-  wakeGradient.addColorStop(0.3, 'rgba(220,248,241,.45)')
-  wakeGradient.addColorStop(0.72, 'rgba(205,240,235,.14)')
-  wakeGradient.addColorStop(1, 'rgba(205,240,235,0)')
-  wakeContext.fillStyle = wakeGradient
-  wakeContext.fillRect(0, 0, 128, 128)
-  wakeContext.globalCompositeOperation = 'destination-out'
-  wakeContext.beginPath()
-  wakeContext.ellipse(64, 64, 23, 16, 0, 0, Math.PI * 2)
-  wakeContext.fill()
-  const wakeTexture = new CanvasTexture(wakeCanvas)
-  const wakeGeometry = new PlaneGeometry(1, 1)
-  const bowFoamMaterial = new MeshBasicMaterial({
-    color: '#ddf2ec',
-    map: wakeTexture,
-    transparent: true,
-    opacity: 0,
-    depthWrite: false,
-  })
-  const bowFoam = new Mesh(wakeGeometry, bowFoamMaterial)
-  bowFoam.rotation.x = -Math.PI / 2
-  bowFoam.scale.set(9, 4, 1)
-  scene.add(bowFoam)
-  const wake = Array.from({ length: 48 }, () => {
-    const material = new MeshBasicMaterial({
-      color: '#e1f7e9',
-      map: wakeTexture,
-      transparent: true,
-      opacity: 0,
-      depthWrite: false,
-    })
-    const mesh = new Mesh(wakeGeometry, material)
-    mesh.rotation.x = -Math.PI / 2
-    mesh.visible = false
-    scene.add(mesh)
-    return { mesh, x: 0, z: 0, age: 100, phase: 0 }
-  })
+  const wake = createWake()
+  scene.add(wake.mesh, wake.bow)
+  ship.position.y = -SHIP_DRAFT
   const initial = getState().vessel
   const origin = { longitude: initial.longitude, latitude: initial.latitude }
   const position = new Vector2()
   const target = new Vector2()
   let heading = initial.heading * rad
   let orbitAzimuth = -0.44
-  let orbitElevation = 0.42
-  let orbitDistance = 92
+  let orbitElevation = 0.22
+  let orbitDistance = 105
   let targetAzimuth = orbitAzimuth
   let targetElevation = orbitElevation
   let targetDistance = orbitDistance
@@ -287,8 +126,6 @@ export function createSailingView(
   let pointerY = 0
   let time = 0
   let previous = 0
-  let wakeElapsed = 0
-  let wakeIndex = 0
   let active = true
   let disposed = false
   function resize() {
@@ -303,8 +140,8 @@ export function createSailingView(
 
   function resetCamera() {
     targetAzimuth = -0.44
-    targetElevation = 0.42
-    targetDistance = 92
+    targetElevation = 0.22
+    targetDistance = 105
   }
   function pointerDown(event: PointerEvent) {
     if (event.button !== 0 && event.button !== 1 && event.button !== 2) return
@@ -350,9 +187,36 @@ export function createSailingView(
     if (previous && now - previous < 1000 / 60 - 1) return
     const delta = Math.min(previous ? (now - previous) / 1000 : 0, 0.1)
     previous = now
-    const { vessel, paused, docked } = getState()
+    const { vessel, paused, docked, skySpeed } = getState()
     const dt = paused ? 0 : delta
     time += dt
+    island.update(time)
+    skyHour = advanceDay(skyHour, dt, skySpeed)
+    skyPublishElapsed += delta
+    if (skyPublishElapsed >= 0.15) {
+      onSkyTime?.(skyHour)
+      skyPublishElapsed = 0
+    }
+    const { phase, daylight } = daylightAt(skyHour)
+    sunDirection.set(Math.cos(phase) * 0.32, Math.sin(phase), Math.cos(phase) * -0.95).normalize()
+    moonDirection.copy(sunDirection).negate()
+    sunlight.intensity = 3.2 * Math.max(0, sunDirection.y) ** 0.45
+    sunlight.color.copy(warmSun).lerp(noonSun, Math.min(1, Math.max(0, sunDirection.y) * 2.5))
+    moonlight.position.copy(moonDirection).multiplyScalar(500)
+    moonlight.intensity = (1 - daylight) * 0.85
+    hemisphere.intensity = 0.38 + daylight * 1.31
+    hemisphere.color.setRGB(0.24 + daylight * 0.38, 0.34 + daylight * 0.4, 0.58 + daylight * 0.32)
+    hemisphere.groundColor.setRGB(
+      0.025 + daylight * 0.1,
+      0.035 + daylight * 0.095,
+      0.05 + daylight * 0.025,
+    )
+    fog.color.copy(nightFog).lerp(dayFog, daylight)
+    fog.color.lerp(sunsetFog, daylight * Math.max(0, 1 - Math.abs(sunDirection.y) * 3.5) * 0.65)
+    renderer.toneMappingExposure = 1.05 + (1 - daylight) * 0.25
+    sky.material.uniforms.daylight!.value = daylight
+    sky.material.uniforms.time!.value = time
+    oceanMaterial.uniforms.daylight!.value = daylight
     const lonDelta = ((vessel.longitude - origin.longitude + 540) % 360) - 180
     target.set(
       lonDelta * 111320 * Math.cos(origin.latitude * rad) * VISUAL_METRES_PER_METRE,
@@ -360,6 +224,11 @@ export function createSailingView(
     )
     const interpolation = 1 - Math.exp(-delta * 12)
     position.lerp(target, interpolation)
+    island.group.position.set(islandAnchor.x - position.x, 0, islandAnchor.y - position.y)
+    oceanMaterial.uniforms.islandCenter!.value.set(island.group.position.x, island.group.position.z)
+    sunlight.target.position.set(island.group.position.x * 0.4, 0, island.group.position.z * 0.4)
+    sunlight.position.copy(sunDirection).multiplyScalar(500).add(sunlight.target.position)
+
     const angle = Math.atan2(
       Math.sin(vessel.heading * rad - heading),
       Math.cos(vessel.heading * rad - heading),
@@ -371,8 +240,14 @@ export function createSailingView(
       cameraInterpolation
     orbitElevation += (targetElevation - orbitElevation) * cameraInterpolation
     orbitDistance += (targetDistance - orbitDistance) * cameraInterpolation
-    ship.rotation.set(Math.sin(time * 1.2) * 0.025, -heading, Math.cos(time * 1.5) * 0.035)
-    ship.position.y = Math.sin(time * 1.3) * 0.28
+    const motion = sampleShipMotion(position.x, position.y, heading, time)
+    const buoyancy = 1 - Math.exp(-dt * 4)
+    ship.rotation.order = 'YXZ'
+    ship.rotation.y = -heading
+    ship.rotation.x += (motion.pitch - ship.rotation.x) * buoyancy
+    ship.rotation.z += (motion.roll - ship.rotation.z) * buoyancy
+    ship.position.y += (motion.height - ship.position.y) * buoyancy
+    nightLights.update(time, daylight)
     sails.forEach((sail) => {
       sail.scale.y = 0.2 + vessel.sail * 0.8
     })
@@ -385,36 +260,15 @@ export function createSailingView(
     )
     camera.lookAt(0, 8 + Math.min(5, orbitDistance * 0.035), 0)
     oceanMaterial.uniforms.time!.value = time
-    oceanMaterial.uniforms.offset!.value.set(position.x, -position.y)
-    bowFoam.position.set(Math.sin(heading) * 13, 1.06, -Math.cos(heading) * 13)
-    bowFoam.rotation.z = heading
-    bowFoamMaterial.opacity = docked ? 0 : Math.min(0.48, vessel.speed * 0.055)
-    wakeElapsed += dt
-    if (!docked && vessel.speed > 0.3 && wakeElapsed > 0.09) {
-      const item = wake[wakeIndex++ % wake.length]!
-      item.x = position.x - Math.sin(heading) * 14
-      item.z = position.y + Math.cos(heading) * 14
-      item.phase = wakeIndex * 1.618
-      item.age = 0
-      wakeElapsed = 0
-    }
-    for (const item of wake) {
-      if (docked) item.age = 100
-      item.age += dt
-      item.mesh.visible = item.age < 4.3
-      const spread = Math.sin(item.phase) * item.age * 0.75
-      item.mesh.position.set(
-        item.x - position.x + Math.cos(heading) * spread,
-        1.05,
-        item.z - position.y + Math.sin(heading) * spread,
-      )
-      item.mesh.rotation.z = heading
-      item.mesh.scale.set(4 + item.age * 3.8, 2.2 + item.age * 2.4, 1)
-      item.mesh.material.opacity = Math.max(0, 0.42 * (1 - item.age / 4.3))
-    }
+    oceanMaterial.uniforms.offset!.value.set(position.x, position.y)
+    wake.update(position.x, position.y, heading, vessel.speed, time, daylight, docked)
     renderer.render(scene, camera)
   })
   return {
+    setSkyHour(hour: number) {
+      skyHour = ((hour % 24) + 24) % 24
+      onSkyTime?.(skyHour)
+    },
     setActive(value: boolean) {
       active = value
       previous = 0
@@ -430,16 +284,15 @@ export function createSailingView(
       renderer.domElement.removeEventListener('pointercancel', pointerUp)
       renderer.domElement.removeEventListener('wheel', zoom)
       renderer.domElement.removeEventListener('dblclick', resetCamera)
-      disposeShip(ship)
+      if (fallbackAttached) disposeShip(fallbackShip)
       sunlight.shadow.map?.dispose()
       ocean.geometry.dispose()
-      oceanMaterial.dispose()
+      ocean.dispose()
       sky.geometry.dispose()
-      skyMaterial.dispose()
-      wakeGeometry.dispose()
-      wakeTexture.dispose()
-      bowFoamMaterial.dispose()
-      wake.forEach((item) => item.mesh.material.dispose())
+      sky.material.dispose()
+      nightLights.dispose()
+      island.dispose()
+      wake.dispose()
       renderer.dispose()
       renderer.domElement.remove()
     },
