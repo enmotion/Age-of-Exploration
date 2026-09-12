@@ -187,6 +187,10 @@ async function start() {
     const { createOcean } = await import('../engine/babylon/ocean/createOcean')
     if (!alive || !canvas.value) return
     runtime.value = await createOcean(canvas.value, values)
+    // 控制契约的计数由控件清单派生，避免在渲染器里硬编码而失效。
+    const active = controls.filter((control) => !control.disabled).length
+    canvas.value.dataset.activeControls = String(active)
+    canvas.value.dataset.inactiveControls = String(controls.length - active)
     ready.value = true
   } catch (cause) {
     console.error(cause)

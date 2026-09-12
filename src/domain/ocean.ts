@@ -63,6 +63,11 @@ export interface OceanSettings {
   smallFoam: number
 
   seaLevel: number
+  /**
+   * 海面网格每边的细分段数（顶点数 = (值 + 1)²，面片数 = 值²）。
+   * 海面平面固定为 700 × 700 米，因此单个面片边长 = 700 ÷ 该值。
+   */
+  facetResolution: number
   lengthScale: number
   vertexDensity: number
   clipLevels: number
@@ -252,6 +257,7 @@ export const defaultOceanSettings: Readonly<OceanSettings> = {
   mediumFoam: 1,
   smallFoam: 0.5,
   seaLevel: 0,
+  facetResolution: 190,
   lengthScale: 15,
   vertexDensity: 30,
   clipLevels: 8,

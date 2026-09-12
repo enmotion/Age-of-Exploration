@@ -378,6 +378,12 @@ button:disabled {
   font-variant-numeric: tabular-nums;
 }
 
+.control-copy .control-summary {
+  color: #8fb7a8;
+  line-height: 1.35;
+  white-space: normal;
+}
+
 .control-widget {
   min-width: 0;
 }

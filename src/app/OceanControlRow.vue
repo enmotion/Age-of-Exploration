@@ -18,6 +18,7 @@ const bounded = computed(
   () => props.control.min !== undefined && props.control.max !== undefined,
 )
 const fullLabel = computed(() => `${props.context} · ${props.control.label}`)
+const summary = computed(() => props.control.summary?.(props.value) ?? '')
 
 function constraintText() {
   if (props.control.type === 'check') return '开 / 关'
@@ -85,6 +86,7 @@ function restoreInvalidColor(event: Event) {
     <div class="control-copy">
       <label :for="`control-${String(control.key)}`">{{ control.label }}</label>
       <small>{{ control.disabled ? '未接入' : constraintText() }}</small>
+      <small v-if="summary" class="control-summary">{{ summary }}</small>
     </div>
 
     <div class="control-widget">

@@ -12,6 +12,8 @@ export type OceanControl = {
   options?: ReadonlyArray<{ label: string; value: string }>
   disabled?: boolean
   hint?: string
+  /** 依据当前取值派生的展示文本，用于把参数换算成直观数量。 */
+  summary?: (value: string | number | boolean) => string
 }
 
 export type OceanControlGroup = {
@@ -67,6 +69,27 @@ export const oceanControlGroups: OceanControlGroup[] = [
       number('timeOffset', '时间位置', { step: 0.1 }),
       bounded('exposure', '曝光', 0.2, 2, 0.05),
       bounded('contrast', '对比度', 0.4, 2, 0.05),
+    ],
+  },
+  {
+    id: 'mesh',
+    title: '海面网格',
+    description: '海面几何密度：细分越高，面片越多越小',
+    controls: [
+      number('facetResolution', '网格细分（每边）', {
+        min: 24,
+        max: 512,
+        step: 1,
+        integer: true,
+        hint: '海面平面固定为 700 × 700 米。面片总数 = 细分²，单个面片边长 = 700 ÷ 细分（米）。改动会重建网格。',
+        summary: (value) => {
+          const segments = Number(value)
+          if (!Number.isFinite(segments) || segments <= 0) return ''
+          const facets = segments * segments
+          const vertices = (segments + 1) * (segments + 1)
+          return `${facets.toLocaleString('zh-CN')} 个面片 · ${vertices.toLocaleString('zh-CN')} 个顶点 · 面片边长 ${(700 / segments).toFixed(2)} m`
+        },
+      }),
     ],
   },
   {

@@ -51,6 +51,39 @@ function direction(degrees: number) {
   return new BABYLON.Vector2(Math.cos(radians), Math.sin(radians))
 }
 
+/**
+ * 海面平面固定为 SEA_EXTENT × SEA_EXTENT 米，细分段数决定面片数量：
+ * 面片数 = 段数²，顶点数 = (段数 + 1)²，单个面片边长 = SEA_EXTENT ÷ 段数。
+ */
+const SEA_EXTENT = 700
+const SEA_SEGMENTS_MIN = 24
+const SEA_SEGMENTS_MAX = 512
+/**
+ * 拖动细分滑杆时 input 事件远密于帧率，必须节流，否则一次拖动会重建上百次网格。
+ * 实测单次重建在主线程上的最长掉帧（1440×880）：
+ *   48 段 ≈ 0ms、190 段 ≈ 0ms、256 段 ≈ 6ms、384 段 ≈ 13ms、512 段 ≈ 22ms。
+ * 低细分可以按帧率级别重建以保持跟手，高细分放慢节流间隔。
+ */
+const SEA_REBUILD_INTERVAL_LOW = 90
+const SEA_REBUILD_INTERVAL_HIGH = 220
+const SEA_REBUILD_HEAVY_SEGMENTS = 256
+
+function createSeaMesh(scene: BABYLON.Scene, segments: number) {
+  return BABYLON.MeshBuilder.CreateGround(
+    'faceted-sea',
+    { width: SEA_EXTENT, height: SEA_EXTENT, subdivisions: segments },
+    scene,
+  )
+}
+
+function clampSeaSegments(value: number) {
+  if (!Number.isFinite(value)) return SEA_SEGMENTS_MIN
+  return Math.min(
+    SEA_SEGMENTS_MAX,
+    Math.max(SEA_SEGMENTS_MIN, Math.round(value)),
+  )
+}
+
 function waveAmplitudes(settings: OceanSettings) {
   return new BABYLON.Vector3(
     Math.max(0.01, settings.largeVertical * settings.swellScale * 1.65),
@@ -663,12 +696,9 @@ export async function createOcean(
       { attributes: ['position'], uniforms: oceanUniforms },
     )
     ocean.backFaceCulling = false
-    const sea = BABYLON.MeshBuilder.CreateGround(
-      'faceted-sea',
-      { width: 700, height: 700, subdivisions: 190 },
-      scene,
-    )
+    let sea = createSeaMesh(scene, clampSeaSegments(initial.facetResolution))
     sea.material = ocean
+    let seaSegments = clampSeaSegments(initial.facetResolution)
 
     const ship = createShip(scene)
     createCloud(scene, -38, 47, 145, 1.18)
@@ -691,6 +721,56 @@ export async function createOcean(
     let clock = initial.timeOffset
     let last = performance.now()
     let disposed = false
+    let pendingSeaRebuild: ReturnType<typeof setTimeout> | undefined
+    let lastSeaRebuildAt = 0
+
+    /** 用新的细分段数重建海面网格；先建后删，重建失败时保留旧网格。 */
+    const rebuildSea = (segments: number) => {
+      if (segments === seaSegments) return
+      const previousMesh = sea
+      sea = createSeaMesh(scene, segments)
+      sea.material = ocean
+      sea.position.y = previousMesh.position.y
+      seaSegments = segments
+      previousMesh.dispose()
+    }
+
+    /** 节流重建：窗口内连续改动合并为一次尾部重建，最终值一定会被应用。 */
+    const scheduleSeaRebuild = (segments: number) => {
+      const interval =
+        segments > SEA_REBUILD_HEAVY_SEGMENTS
+          ? SEA_REBUILD_INTERVAL_HIGH
+          : SEA_REBUILD_INTERVAL_LOW
+      const elapsed = performance.now() - lastSeaRebuildAt
+      if (elapsed >= interval) {
+        if (pendingSeaRebuild) {
+          clearTimeout(pendingSeaRebuild)
+          pendingSeaRebuild = undefined
+        }
+        lastSeaRebuildAt = performance.now()
+        rebuildSea(segments)
+        return
+      }
+      if (pendingSeaRebuild) clearTimeout(pendingSeaRebuild)
+      pendingSeaRebuild = setTimeout(
+        () => {
+          pendingSeaRebuild = undefined
+          lastSeaRebuildAt = performance.now()
+          if (!disposed) rebuildSea(segments)
+        },
+        Math.max(0, interval - elapsed),
+      )
+    }
+
+    const applySeaResolution = (next: OceanSettings, first: boolean) => {
+      const segments = clampSeaSegments(next.facetResolution)
+      if (first) {
+        rebuildSea(segments)
+        lastSeaRebuildAt = performance.now()
+        return
+      }
+      scheduleSeaRebuild(segments)
+    }
 
     const apply = (next: OceanSettings, first = false) => {
       const lastSettings = previous
@@ -703,6 +783,7 @@ export async function createOcean(
       scene.imageProcessingConfiguration.contrast = next.contrast
       hemi.intensity = 0.72 * next.envIntensity
       sun.intensity = 1.22 * next.lightIntensity
+      applySeaResolution(next, first)
       sea.position.y = next.seaLevel
       wake.mesh.position.y = next.seaLevel
       ocean.wireframe = next.wireframe
@@ -938,8 +1019,6 @@ export async function createOcean(
     engine.setHardwareScalingLevel(1 / Math.min(devicePixelRatio || 1, 1.5))
     engine.resize()
     canvas.dataset.renderer = 'webgl-art-directed-ocean'
-    canvas.dataset.activeControls = '73'
-    canvas.dataset.inactiveControls = '0'
 
     await new Promise<void>((resolve) => scene.executeWhenReady(resolve))
     engine.runRenderLoop(() => scene.render())
@@ -955,6 +1034,10 @@ export async function createOcean(
       dispose() {
         if (disposed) return
         disposed = true
+        if (pendingSeaRebuild) {
+          clearTimeout(pendingSeaRebuild)
+          pendingSeaRebuild = undefined
+        }
         resize?.disconnect()
         engine.stopRenderLoop()
         camera.detachControl()

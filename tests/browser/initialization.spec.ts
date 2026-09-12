@@ -28,6 +28,7 @@ test('runs the art-directed ocean and only exposes live controls', async ({
 
   for (const group of [
     '场景与播放',
+    '海面网格',
     '风浪与涌浪',
     '大中小波分层',
     '折面、明暗与水色',
@@ -51,9 +52,9 @@ test('runs the art-directed ocean and only exposes live controls', async ({
     await foam.evaluate((input: HTMLInputElement) => input.checkValidity()),
   ).toBe(true)
 
-  await expect(page.locator('.control-row')).toHaveCount(73)
+  await expect(page.locator('.control-row')).toHaveCount(74)
   await expect(page.locator('.control-row.is-disabled')).toHaveCount(0)
-  await expect(canvas).toHaveAttribute('data-active-controls', '73')
+  await expect(canvas).toHaveAttribute('data-active-controls', '74')
   await expect(canvas).toHaveAttribute('data-inactive-controls', '0')
 
   await page.getByRole('button', { name: '黄昏', exact: true }).click()
