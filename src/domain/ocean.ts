@@ -148,6 +148,7 @@ export interface OceanSettings {
   foamMaskScale: number
   foamMaskAspect: number
   foamMaskAngle: number
+  foamFoldBias: number
   foamBreakup: number
   foamDistortion: number
   foamSpeedX: number
@@ -336,6 +337,7 @@ export const defaultOceanSettings: Readonly<OceanSettings> = {
   foamMaskScale: 0.22,
   foamMaskAspect: 2.4,
   foamMaskAngle: -30,
+  foamFoldBias: 0.9,
   foamBreakup: 0.35,
   foamDistortion: 0.2,
   foamSpeedX: 0.2,

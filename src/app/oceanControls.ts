@@ -205,6 +205,7 @@ export const oceanControlGroups: OceanControlGroup[] = [
       bounded('foamBiasSmall', '小波阈值', 0, 1.5, 0.02),
       bounded('foamHeightWeight', '浪高响应', 0, 1, 0.02),
       bounded('foamSlopeWeight', '坡度响应', 0, 2, 0.02),
+      bounded('foamFoldBias', '折叠阈值', 0.7, 1, 0.005),
       bounded('foamBreakup', '破碎阈值', 0, 1, 0.02),
     ],
   },

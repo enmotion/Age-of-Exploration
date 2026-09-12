@@ -737,6 +737,14 @@ export async function createOcean(
       'islandCount',
       'contactFoam',
       'foamContact',
+      'foamFoldBias',
+      'foamFoldScale',
+      'skyLuminance',
+      'seaHalfExtent',
+      'turbidity',
+      'rayleigh',
+      'mie',
+      'foamHistoryStep',
       'fogMode',
       'fogStart',
       'fogEnd',
@@ -906,6 +914,17 @@ export async function createOcean(
       ocean.setFloat('shadingBias', next.shadingBias)
       ocean.setFloat('toneSteps', next.toneSteps)
       ocean.setFloat('toneTransition', next.toneTransition)
+      ocean.setFloat('foamFoldBias', next.foamFoldBias)
+      ocean.setFloat('foamFoldScale', 12)
+      ocean.setFloat('foamHistoryStep', 0.16)
+      ocean.setFloat(
+        'skyLuminance',
+        Math.max(0.08, next.luminance * next.envIntensity),
+      )
+      ocean.setFloat('turbidity', next.turbidity)
+      ocean.setFloat('rayleigh', next.rayleigh)
+      ocean.setFloat('mie', next.mie)
+      ocean.setFloat('seaHalfExtent', SEA_EXTENT / 2)
       ocean.setFloat('heightColorStrength', next.heightColorStrength)
       ocean.setFloat('heightColorBias', next.heightColorBias)
       ocean.setFloat('slopeColorStrength', next.slopeColorStrength)

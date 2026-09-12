@@ -2,6 +2,7 @@ export const oceanWaveFunctions = /* glsl */ `
 // 波分量表由 CPU 侧 buildWaveComponents 生成后整表传入，两边共用同一份定义，
 // 避免"着色器改了、浮力用的 CPU 采样没改"导致船浮在错误高度。
 #define WAVE_COUNT 24
+#define FOAM_HISTORY 4
 // time 由各顶点着色器自行声明（这里再声明会与之重复定义）
 uniform float chop;
 uniform vec4 waveA[WAVE_COUNT];   // x=方向x y=方向z z=波长 w=速度
@@ -55,7 +56,67 @@ void evaluateOcean(vec2 base, out vec3 displacement, out vec2 slope, out vec3 cr
 
 // 逐格稳定伪随机值：同样输入永远同样输出，用于面片 ID 与顶点抖动。
 float oceanHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+
+// 位移雅可比行列式：衡量水平位移把面片压缩到什么程度，J→0 表示面片接近折叠。
+// 参考实现（Babylon FFT Ocean 官方 demo）正是用这个量驱动白沫，而不是高度极大值。
+float evaluateJacobianAt(vec2 base, float t) {
+  float jxx = 0.0, jzz = 0.0, jxz = 0.0;
+  for (int i = 0; i < WAVE_COUNT; i++) {
+    vec4 a = waveA[i];
+    vec4 b = waveB[i];
+    float k = 6.2831853 / max(a.z, 0.2);
+    float phase = dot(base, a.xy) * k + t * a.w + b.y;
+    float s = sin(phase);
+    float c = cos(phase);
+    float p2 = 1.96;                       // plateau²，plateau = 1.4
+    float den = 1.0 + s * s * p2;
+    // shaped 的二阶导：-nrm · s · (den + 3p²c²) / den^2.5
+    float d2 = -sqrt(1.0 + p2) * s * (den + 3.0 * p2 * c * c) / (den * den * sqrt(den));
+    float qk = k * b.x * b.z * chop * 0.34;
+    jxx += qk * a.x * a.x * d2;
+    jzz += qk * a.y * a.y * d2;
+    jxz += qk * a.x * a.y * d2;
+  }
+  return (1.0 + jxx) * (1.0 + jzz) - jxz * jxz;
+}
+
+// 时间累积的折叠度：在若干"过去时刻"上取衰减后的最小值。
+// 这与参考实现的 turbulence = min(J, prev + dt·0.5/max(J,0.5)) 语义等价——
+// min 让白沫在折叠瞬间立即出现，随时间的加法让它缓慢消散，白沫因此有"记忆"。
+// 解析波场是时间的确定性函数，所以可以直接回采历史，不需要任何渲染目标。
+uniform float foamHistoryStep;
+float evaluateFoamFold(vec2 base) {
+  float turbulence = 1.0;
+  for (int k = 0; k < FOAM_HISTORY; k++) {
+    float past = time - float(k) * foamHistoryStep;
+    float jacobian = evaluateJacobianAt(base, past);
+    turbulence = min(turbulence, jacobian + float(k) * foamHistoryStep * 0.5);
+  }
+  return turbulence;
+}
 `
+export const skyShared = /* glsl */ `
+// 天空基色：天空着色器与海面着色器**共用这一份实现**。
+// 海天交界要严丝合缝，两边的颜色必须逐项一致——只调雾色是调不准的。
+// 不含云与星空（那两项只在天空着色器里叠加）。
+vec3 skyBaseColor(vec3 d, float turbidity, float rayleigh, float mie, float nightAmount) {
+  float sunset = 1.0 - smoothstep(.04, .24, -sunDirection.y);
+  vec3 horizon = mix(vec3(.50,.77,.91), vec3(1.0,.36,.10), sunset*.9);
+  vec3 zenith = mix(vec3(.08,.38,.72), vec3(.52,.20,.28), sunset*.85);
+  float gradPow = mix(.48,.7, clamp(turbidity/30.0,0.0,1.0)) * (1.0 - sunset*.4);
+  vec3 sky = mix(horizon, zenith, pow(clamp(d.y*.5+.5,0.0,1.0), gradPow));
+  float haze = pow(1.0 - max(d.y,0.0), 5.0);
+  sky = mix(sky, horizon, haze*.35);
+  sky = mix(sky, vec3(.008,.025,.09), nightAmount*.94);
+  vec3 sunDir = normalize(-sunDirection);
+  float sun = pow(max(dot(d, sunDir), 0.0), 4000.0);
+  sky += mix(vec3(1.0,.9,.65), vec3(1.0,.37,.12), sunset)*sun*2.8*(1.0-nightAmount);
+  float sunGlow = pow(max(dot(d, sunDir), 0.0), 6.0);
+  sky += vec3(1.0,.44,.16)*sunGlow*sunset*.5*(1.0-nightAmount);
+  sky *= mix(.72,1.28,clamp(rayleigh/4.0,0.0,1.0));
+  sky += vec3(1.0,.72,.42)*mie*sun*18.0;
+  return sky;
+}`
 
 export const oceanVertex = /* glsl */ `
 precision highp float;
@@ -69,6 +130,7 @@ varying vec3 vWorld;
 varying float vHeight;
 varying vec3 vCrests;
 varying vec2 vBase;
+varying float vFold;
 ${oceanWaveFunctions}
 void main() {
   vec2 base = position.xz;
@@ -84,6 +146,9 @@ void main() {
   vHeight = displacement.y;
   vCrests = crests;
   vBase = base;
+  // 折叠度在未变形的格点上求值：雅可比描述的是"平面 → 位移后曲面"这个映射的压缩程度。
+  // 传入的是时间累积后的值（含衰减历史），白沫因此会残留。
+  vFold = evaluateFoamFold(base);
   gl_Position = worldViewProjection * vec4(p, 1.0);
 }`
 
@@ -94,6 +159,7 @@ varying vec3 vWorld;
 varying float vHeight;
 varying vec3 vCrests;
 varying vec2 vBase;
+varying float vFold;
 uniform vec3 cameraPosition;
 uniform vec3 sunDirection;
 uniform vec3 deepColor;
@@ -137,6 +203,15 @@ uniform float glintDistortion;
 uniform float crestFoam;
 uniform vec3 foamWeights;
 uniform vec3 foamBias;
+uniform float foamFoldBias;
+uniform float foamFoldScale;
+uniform float foamExtent;
+uniform float skyLuminance;
+uniform float turbidity;
+uniform float rayleigh;
+uniform float mie;
+uniform float seaHalfExtent;
+${skyShared}
 uniform float foamAmount;
 uniform float foamHeightWeight;
 uniform float foamSlopeWeight;
@@ -208,15 +283,26 @@ void main() {
   float nightAmount=1.0-clamp((sunElevation+.08)/.28,0.0,1.0);
   // 夜里太阳在地平线以下，镜面高光会整体熄灭，所以入夜后改用月亮作为光路光源。
   vec3 lightToward=normalize(mix(-sunDirection,vec3(-.1,.22,.97),step(.5,nightAmount)));
+  // 水体自身的昼夜染色必须放在反射**之前**：它描述的是"水本身"的颜色，
+  // 放在反射之后会把刚混进去的天光反射整个盖掉——这正是之前"看不到倒影"的原因。
+  // 夕阳对水体本身的作用是"去饱和压暗"而不是加暖：实测参考图的黄昏水体是暗中性紫
+  // （#584859，R≈B），暖色其实来自太阳光路与天光反射。之前朝亮暖色混合会把水洗成浅藕色。
+  water=mix(water,vec3(.12,.09,.13),sunsetAmount*.7);
+  // 入夜改为混向月光蓝，而不是乘暗：参考图的夜晚水面依然看得清。
+  water=mix(water,vec3(.16,.26,.46),nightAmount*.55);
+
   float ndv=max(dot(normal,viewDir),0.0);
   float fresnel=clamp((.025+.86*pow(1.0-ndv,4.0))*fresnelStrength+fresnelBias,0.0,1.0);
   // 天光反射随太阳高度变色：低太阳角时换成暖橙，入夜后压成冷蓝。
-  vec3 reflectedSky=mix(
-    mix(vec3(.50,.77,.91),vec3(1.0,.45,.18),sunsetAmount*.9),
-    mix(vec3(.08,.38,.72),vec3(.34,.12,.30),sunsetAmount*.85),
-    clamp(normal.y*.62+.22,0.0,1.0));
-  reflectedSky=mix(reflectedSky,vec3(.04,.09,.19),nightAmount*.9);
-  water=mix(water,reflectedSky,fresnel*(.42+roughness*.22));
+  // 天光反射：按**反射方向**求真实天空色，而不是写死的两色渐变。
+  // 复用与天空着色器同一份 skyBaseColor，于是天顶渐变、太阳位置、日落色温
+  // 都会出现在正确的地方——不需要任何额外渲染通道。
+  vec3 reflectDir=reflect(-viewDir,normal);
+  vec3 reflectedSky=pow(clamp(skyBaseColor(reflectDir,turbidity,rayleigh,mie,nightAmount)*skyLuminance,0.0,1.0),vec3(.92));
+  // 反射权重直接用菲涅尔反射率。旧代码在这里乘了 (.42+roughness*.22) ≈ 0.46，
+  // 那是为"写死的假天空渐变"调的——现在反射是真的，再乘就把强度砍掉一半多，
+  // 结果就是"看不到倒影"。
+  water=mix(water,reflectedSky,fresnel*(1.0-roughness*.35));
 
   vec3 halfDir=normalize(viewDir+lightToward);
   float spec=pow(max(dot(normal,halfDir),0.0),max(2.0,highlightSharpness));
@@ -240,11 +326,17 @@ void main() {
   // 看起来像水里漂着大片米色斑块，而不是一条朝向太阳的光路。
   water+=highlightColor*spec*band*highlightStrength*.5;
 
-  float foamSignal=max(
+  // ---- 白沫主项：位移雅可比（折叠度）----
+  // 参考实现用的是同一判据，只是它把折叠度写进一张持久纹理做时间累积；
+  // 这里先用瞬时值，等缓冲链路打通再加上衰减，白沫就会带上"记忆"。
+  float foldFoam=clamp((foamFoldBias-vFold)*foamFoldScale,0.0,1.0);
+  // 浪高与坡度只做细修正（参考实现里它们的权重也只有 0.04 / 0.08）
+  float refine=max(
     vCrests.x*foamWeights.x-foamBias.x,
     max(vCrests.y*foamWeights.y-foamBias.y,vCrests.z*foamWeights.z-foamBias.z)
   );
-  foamSignal+=vHeight*foamHeightWeight+slope*foamSlopeWeight;
+  refine+=vHeight*foamHeightWeight+slope*foamSlopeWeight;
+  float foamSignal=max(0.0,foldFoam+max(0.0,refine)*.6);
   vec2 foamUV=rotation(radians(foamMaskAngle))*(vWorld.xz*vec2(foamMaskScale,foamMaskScale/max(.1,foamMaskAspect))+time*foamSpeed);
   float foamPattern=fbm(foamUV)+(noise(foamUV*2.7)-.5)*foamDistortion;
   // 低频噪声只负责把白沫打散成不连续的区域，形状本身交给面片量化。
@@ -281,11 +373,6 @@ void main() {
   float shoreFoam=(1.0-smoothstep(0.0,3.4,max(0.0,shoreDistance)))*step(-2.5,shoreDistance);
   water=mix(water,foamLit,clamp(contactFoam*foamContact*shoreFoam,0.0,.92));
 
-  // 夕阳对水体本身的作用是"去饱和压暗"而不是加暖：实测参考图的黄昏水体是暗中性紫
-  // （#584859，R≈B），暖色其实来自太阳光路与天光反射。之前朝亮暖色混合会把水洗成浅藕色。
-  water=mix(water,vec3(.12,.09,.13),sunsetAmount*.7);
-  // 入夜改为混向月光蓝，而不是乘暗：参考图的夜晚水面依然看得清。
-  water=mix(water,vec3(.16,.26,.46),nightAmount*.55);
 
   float transmission=pow(max(0.0,dot(viewDir,-normalize(sunDirection))),3.0)*max(0.0,vHeight*sssScale+sssBase)*sssStrength;
   water+=sssColor*transmission*(1.0-foam);
@@ -296,6 +383,27 @@ void main() {
   if(fogMode>.5&&fogMode<1.5) fog=smoothstep(fogStart,fogEnd,dist);
   else if(fogMode>=1.5) fog=1.0-exp(-dist*fogDensity*(fogMode>2.5?dist*fogDensity:1.0));
   water=mix(water,fogColor,clamp(fog,0.0,.92));
+
+  // ---- 海天交界：把远处水面融进天空的地平线颜色 ----
+  // 只调雾色是不够的：雾在平面边缘也到不了 100%，而且雾色与天空地平线色本来就不同，
+  // 结果就是一条硬边。这里用与天空着色器**完全相同**的公式算出地平线色，
+  // 再按"视线是否接近水平"把它混上去，接缝因此彻底消失，且与海面尺寸无关。
+  float skySunset=1.0-smoothstep(.04,.24,sunElevation);
+  vec3 horizonColor=mix(vec3(.50,.77,.91),vec3(1.0,.36,.10),skySunset*.9);
+  horizonColor=mix(horizonColor,vec3(.008,.025,.09),nightAmount*.94);
+  horizonColor=pow(clamp(horizonColor*skyLuminance,0.0,1.0),vec3(.92));
+  // 渐隐范围跟着"到海面平面边界的距离"自适应：
+  // 在到达边界之前就把水面完全变成天空色，这样平面边缘本身落在已经虚化完的区域里，
+  // 接缝因此不可见——而且相机升高、朝向改变时都成立（固定的 viewDir 阈值做不到这点）。
+  vec2 planar = vWorld.xz - cameraPosition.xz;
+  vec2 planarDir = planar / max(1e-4, length(planar));
+  // 注意不能用 sign(planarDir)：分量为 0 时 sign 返回 0，会算出 0/0 = NaN 让整个混合失效。
+  vec2 dirSign = vec2(planarDir.x >= 0.0 ? 1.0 : -1.0, planarDir.y >= 0.0 ? 1.0 : -1.0);
+  vec2 edgeT = (dirSign * seaHalfExtent - cameraPosition.xz) / planarDir;
+  float edgeDistance = max(1.0, min(edgeT.x, edgeT.y));
+  float horizonFade = smoothstep(edgeDistance * 0.35, edgeDistance * 0.88, dist);
+  water = mix(water, horizonColor, horizonFade);
+
   gl_FragColor=vec4(water,1.0);
 }`
 
@@ -317,29 +425,18 @@ uniform float turbidity;
 uniform float rayleigh;
 uniform float mie;
 uniform float nightAmount;
+${skyShared}
 float hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
 float noise(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.0-2.0*f);return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);}
 float fbm(vec2 p){float v=0.0,a=.5;for(int i=0;i<5;i++){v+=a*noise(p);p=p*2.03+17.1;a*=.5;}return v;}
 void main(){
- vec3 d=normalize(vPos);float y=clamp(d.y*.5+.5,0.0,1.0);
+ vec3 d=normalize(vPos);
  float sunset=1.0-smoothstep(.04,.24,-sunDirection.y);
- vec3 horizon=mix(vec3(.50,.77,.91),vec3(1.0,.36,.10),sunset*.9);
- vec3 zenith=mix(vec3(.08,.38,.72),vec3(.52,.20,.28),sunset*.85);
- // 日落时把渐变指数压低，让暖色从地平线往上铺得更开，而不是很快转成灰紫。
- float gradPow=mix(.48,.7,clamp(turbidity/30.0,0.0,1.0))*(1.0-sunset*.4);
- vec3 sky=mix(horizon,zenith,pow(y,gradPow));
- // 地平线霞光必须叠加在夜景压暗之前：否则太阳落到地平线以下后霞光仍是全强度，
- // 夜里地平线会一直发橙，还会被水面的掠射反射带上岸。
- float haze=pow(1.0-max(d.y,0.0),5.0);sky=mix(sky,horizon,haze*.35);
- sky=mix(sky,vec3(.008,.025,.09),nightAmount*.94);
- float sun=pow(max(dot(d,normalize(-sunDirection)),0.0),4000.0);sky+=mix(vec3(1.0,.9,.65),vec3(1.0,.37,.12),sunset)*sun*2.8*(1.0-nightAmount);
- // 低太阳角时再补一圈很宽的暖辉：参考图的日落是整个天空在发光，不只是一颗小圆盘。
- float sunGlow=pow(max(dot(d,normalize(-sunDirection)),0.0),6.0);
- sky+=vec3(1.0,.44,.16)*sunGlow*sunset*.5*(1.0-nightAmount);
+ // 天空基色与海面共用同一份实现，海天交界才能对齐
+ vec3 sky=skyBaseColor(d,turbidity,rayleigh,mie,nightAmount);
  if(d.y>.018){vec2 uv=d.xz/(d.y+.16)*.53;float cloud=smoothstep(.48,.67,fbm(uv+vec2(time*.003,0.0)));cloud*=smoothstep(.018,.11,d.y)*(1.0-smoothstep(.56,.94,d.y));vec3 cloudColor=mix(vec3(1.0,.94,.84),vec3(1.0,.54,.31),sunset*.65);sky=mix(sky,cloudColor,cloud*.82*(1.0-nightAmount*.72));}
  float stars=step(.985,hash(floor(d.xz*420.0/(d.y+.35))))*smoothstep(.12,.65,d.y)*nightAmount;
  sky+=vec3(.74,.86,1.0)*stars;
- sky*=mix(.72,1.28,clamp(rayleigh/4.0,0.0,1.0));sky+=vec3(1.0,.72,.42)*mie*sun*18.0;
  gl_FragColor=vec4(pow(clamp(sky*luminance,0.0,1.0),vec3(.92)),1.0);
 }`
 
