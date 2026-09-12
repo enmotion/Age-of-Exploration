@@ -69,11 +69,57 @@ const SEA_REBUILD_INTERVAL_HIGH = 220
 const SEA_REBUILD_HEAVY_SEGMENTS = 256
 
 function createSeaMesh(scene: BABYLON.Scene, segments: number) {
-  return BABYLON.MeshBuilder.CreateGround(
-    'faceted-sea',
-    { width: SEA_EXTENT, height: SEA_EXTENT, subdivisions: segments },
-    scene,
-  )
+  const cellSize = SEA_EXTENT / segments
+  const side = segments + 1
+  const positions = new Float32Array(side * side * 3)
+  const half = SEA_EXTENT / 2
+  for (let row = 0; row < side; row += 1) {
+    for (let col = 0; col < side; col += 1) {
+      const index = (row * side + col) * 3
+      positions[index] = col * cellSize - half
+      positions[index + 1] = 0
+      positions[index + 2] = row * cellSize - half
+    }
+  }
+  // 每个格子的对角线方向按格号随机翻转，破坏规则格纹带来的对称感。
+  const indices = new Uint32Array(segments * segments * 6)
+  let cursor = 0
+  for (let row = 0; row < segments; row += 1) {
+    for (let col = 0; col < segments; col += 1) {
+      const a = col + row * side
+      const b = col + 1 + row * side
+      const c = col + 1 + (row + 1) * side
+      const d = col + (row + 1) * side
+      if (seaCellHash(col, row) > 0.5) {
+        indices[cursor] = a
+        indices[cursor + 1] = b
+        indices[cursor + 2] = d
+        indices[cursor + 3] = b
+        indices[cursor + 4] = c
+        indices[cursor + 5] = d
+      } else {
+        indices[cursor] = a
+        indices[cursor + 1] = b
+        indices[cursor + 2] = c
+        indices[cursor + 3] = a
+        indices[cursor + 4] = c
+        indices[cursor + 5] = d
+      }
+      cursor += 6
+    }
+  }
+  const mesh = new BABYLON.Mesh('faceted-sea', scene)
+  const vertexData = new BABYLON.VertexData()
+  vertexData.positions = positions
+  vertexData.indices = indices
+  vertexData.applyToMesh(mesh, false)
+  return mesh
+}
+
+/** 与着色器 oceanHash 同构的 CPU 版本，仅用于决定网格拓扑。 */
+function seaCellHash(x: number, y: number) {
+  const value = Math.sin(x * 127.1 + y * 311.7) * 43758.5453
+  return value - Math.floor(value)
 }
 
 function clampSeaSegments(value: number) {
@@ -636,18 +682,13 @@ export async function createOcean(
       'highlightColor',
       'sssColor',
       'fogColor',
+      'cellSize',
       'facetStrength',
-      'detailNormalStrength',
-      'normalScaleX',
-      'normalScaleZ',
+      'facetJitter',
       'shadingContrast',
       'shadingBias',
       'toneSteps',
       'toneTransition',
-      'colorPatches',
-      'patchScale',
-      'patchStrength',
-      'patchSpeed',
       'heightColorStrength',
       'heightColorBias',
       'slopeColorStrength',
@@ -726,6 +767,8 @@ export async function createOcean(
 
     /** 用新的细分段数重建海面网格；先建后删，重建失败时保留旧网格。 */
     const rebuildSea = (segments: number) => {
+      // cellSize 与网格必须同步更新，否则面片 ID 会和真实面片错位。
+      ocean.setFloat('cellSize', SEA_EXTENT / segments)
       if (segments === seaSegments) return
       const previousMesh = sea
       sea = createSeaMesh(scene, segments)
@@ -846,20 +889,11 @@ export async function createOcean(
       ocean.setColor3('sssColor', linearColor(next.sssColor))
       ocean.setColor3('fogColor', linearColor(next.fogColor))
       ocean.setFloat('facetStrength', next.facetStrength)
-      ocean.setFloat('detailNormalStrength', next.detailNormalStrength)
-      ocean.setFloat('normalScaleX', next.normalScaleX)
-      ocean.setFloat('normalScaleZ', next.normalScaleZ)
+      ocean.setFloat('facetJitter', next.facetJitter)
       ocean.setFloat('shadingContrast', next.shadingContrast)
       ocean.setFloat('shadingBias', next.shadingBias)
       ocean.setFloat('toneSteps', next.toneSteps)
       ocean.setFloat('toneTransition', next.toneTransition)
-      ocean.setFloat('colorPatches', next.colorPatches ? 1 : 0)
-      ocean.setFloat('patchScale', next.patchScale)
-      ocean.setFloat('patchStrength', next.patchStrength)
-      ocean.setVector2(
-        'patchSpeed',
-        new BABYLON.Vector2(next.patchSpeedX, next.patchSpeedZ),
-      )
       ocean.setFloat('heightColorStrength', next.heightColorStrength)
       ocean.setFloat('heightColorBias', next.heightColorBias)
       ocean.setFloat('slopeColorStrength', next.slopeColorStrength)

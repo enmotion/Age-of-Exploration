@@ -52,9 +52,9 @@ test('runs the art-directed ocean and only exposes live controls', async ({
     await foam.evaluate((input: HTMLInputElement) => input.checkValidity()),
   ).toBe(true)
 
-  await expect(page.locator('.control-row')).toHaveCount(74)
+  await expect(page.locator('.control-row')).toHaveCount(75)
   await expect(page.locator('.control-row.is-disabled')).toHaveCount(0)
-  await expect(canvas).toHaveAttribute('data-active-controls', '74')
+  await expect(canvas).toHaveAttribute('data-active-controls', '75')
   await expect(canvas).toHaveAttribute('data-inactive-controls', '0')
 
   await page.getByRole('button', { name: '黄昏', exact: true }).click()

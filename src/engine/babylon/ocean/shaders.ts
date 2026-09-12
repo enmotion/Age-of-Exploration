@@ -37,6 +37,9 @@ void evaluateOcean(vec2 base, out vec3 displacement, out vec2 slope, out vec3 cr
     crests[i] = crest;
   }
 }
+
+// 逐格稳定伪随机值：同样输入永远同样输出，用于面片 ID。
+float oceanHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 `
 
 export const oceanVertex = /* glsl */ `
@@ -45,20 +48,27 @@ attribute vec3 position;
 uniform mat4 worldViewProjection;
 uniform mat4 world;
 uniform float time;
+uniform float cellSize;
+uniform float facetJitter;
 varying vec3 vWorld;
 varying float vHeight;
 varying vec3 vCrests;
-varying vec3 vSmoothNormal;
+varying vec2 vBase;
 ${oceanWaveFunctions}
 void main() {
-  vec3 p = position;
+  vec2 base = position.xz;
+  vec2 lattice = base / max(0.001, cellSize);
+  // 只抖动渲染位置；base 保持规则格点，因此片元里 floor(vBase / cellSize)
+  // 与真实面片逐一对应，面片 ID 不会错位。
+  vec2 offset = (vec2(oceanHash(lattice), oceanHash(lattice + 37.13)) - 0.5) * facetJitter * cellSize;
+  vec3 p = vec3(base.x + offset.x, position.y, base.y + offset.y);
   vec3 displacement; vec2 slope; vec3 crests;
   evaluateOcean(p.xz, displacement, slope, crests);
   p += displacement;
   vWorld = (world * vec4(p, 1.0)).xyz;
   vHeight = displacement.y;
   vCrests = crests;
-  vSmoothNormal = normalize(vec3(-slope.x, 1.0, -slope.y));
+  vBase = base;
   gl_Position = worldViewProjection * vec4(p, 1.0);
 }`
 
@@ -68,7 +78,7 @@ precision highp float;
 varying vec3 vWorld;
 varying float vHeight;
 varying vec3 vCrests;
-varying vec3 vSmoothNormal;
+varying vec2 vBase;
 uniform vec3 cameraPosition;
 uniform vec3 sunDirection;
 uniform vec3 deepColor;
@@ -80,18 +90,12 @@ uniform vec3 highlightColor;
 uniform vec3 sssColor;
 uniform vec3 fogColor;
 uniform float time;
+uniform float cellSize;
 uniform float facetStrength;
-uniform float detailNormalStrength;
-uniform float normalScaleX;
-uniform float normalScaleZ;
 uniform float shadingContrast;
 uniform float shadingBias;
 uniform float toneSteps;
 uniform float toneTransition;
-uniform float colorPatches;
-uniform float patchScale;
-uniform float patchStrength;
-uniform vec2 patchSpeed;
 uniform float heightColorStrength;
 uniform float heightColorBias;
 uniform float slopeColorStrength;
@@ -148,10 +152,14 @@ mat2 rotation(float angle){float c=cos(angle),s=sin(angle);return mat2(c,-s,s,c)
 void main() {
   vec3 faceNormal = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
   if (faceNormal.y < 0.0) faceNormal *= -1.0;
-  vec3 smoothNormal = normalize(vec3(vSmoothNormal.x*normalScaleX, vSmoothNormal.y, vSmoothNormal.z*normalScaleZ));
-  vec3 normal = normalize(mix(smoothNormal, faceNormal, clamp(facetStrength*stylized,0.0,1.0)));
-  normal = normalize(mix(vec3(0.0,1.0,0.0),normal,detailNormalStrength));
-  float slope = 1.0 - max(normal.y,0.0);
+  // 纯平色：只用真实三角形的面法线，不做平滑法线混合，也不叠加法线扰动。
+  vec3 normal = faceNormal;
+  float slope = 1.0 - max(normal.y, 0.0);
+  // 面片 ID：把未变形的格点坐标量化成格号，逐面片得到稳定随机值。
+  // 格号只取决于面片在地面网格里的位置，与浪高、时间无关，所以不会闪。
+  // hash 必须与顶点着色器的 oceanHash、CPU 端 seaCellHash 保持同一公式。
+  vec2 facetCell = floor(vBase / max(0.001, cellSize));
+  float facetId = hash(facetCell);
 
   float heightMask = clamp(vHeight*heightColorStrength+heightColorBias,0.0,1.0);
   float slopeMask = clamp(slope*slopeColorStrength+slopeColorBias,0.0,1.0);
@@ -162,12 +170,13 @@ void main() {
   float lighting = clamp(dot(normal,normalize(-sunDirection))*.52+.52,0.0,1.0);
   lighting = clamp(lighting*shadingContrast+shadingBias,0.0,1.0);
   float stepped = floor(lighting*max(1.0,toneSteps)+.5)/max(1.0,toneSteps);
-  lighting = mix(stepped,lighting,clamp(toneTransition,0.0,1.0));
+  // 风格化色阶开启时用硬档位，关闭时退回连续明暗。
+  lighting = mix(stepped, lighting, mix(1.0, clamp(toneTransition,0.0,1.0), step(0.5, stylized)));
   water *= .55+lighting*.64;
   water += crestColor*lighting*lightColorStrength;
 
-  vec2 patchCell=floor((vWorld.xz+time*patchSpeed)/max(.1,patchScale));
-  water *= 1.0+(hash(patchCell)-.5)*patchStrength*colorPatches;
+  // 逐面片明度差异：相邻面片明度跳变，是低多边形面片读感的主要来源。
+  water *= 1.0 + (facetId - .5) * facetStrength * .36;
 
   vec3 viewDir=normalize(cameraPosition-vWorld);
   float ndv=max(dot(normal,viewDir),0.0);

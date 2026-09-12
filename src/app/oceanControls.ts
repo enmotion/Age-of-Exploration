@@ -90,6 +90,7 @@ export const oceanControlGroups: OceanControlGroup[] = [
           return `${facets.toLocaleString('zh-CN')} 个面片 · ${vertices.toLocaleString('zh-CN')} 个顶点 · 面片边长 ${(700 / segments).toFixed(2)} m`
         },
       }),
+      bounded('facetJitter', '面片抖动', 0, 0.5, 0.01),
     ],
   },
   {
@@ -160,7 +161,7 @@ export const oceanControlGroups: OceanControlGroup[] = [
     title: '折面、明暗与水色',
     description: '参考图风格的主要美术控制',
     controls: [
-      bounded('facetStrength', '折面强度', 0, 1, 0.02),
+      bounded('facetStrength', '面片明暗差异', 0, 1, 0.02),
       bounded('toneSteps', '明暗色阶', 1, 12, 1),
       bounded('shadingContrast', '明暗对比', 0.2, 3, 0.05),
       color('waterColor', '基础海蓝'),

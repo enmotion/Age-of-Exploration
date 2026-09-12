@@ -68,6 +68,11 @@ export interface OceanSettings {
    * 海面平面固定为 700 × 700 米，因此单个面片边长 = 700 ÷ 该值。
    */
   facetResolution: number
+  /**
+   * 面片顶点在水平方向的抖动幅度（单位为格宽的比例）。
+   * 0 = 规则格纹；0.3 ~ 0.4 得到参考图那种不规则碎面。过大时四边形会被压扁。
+   */
+  facetJitter: number
   lengthScale: number
   vertexDensity: number
   clipLevels: number
@@ -258,6 +263,7 @@ export const defaultOceanSettings: Readonly<OceanSettings> = {
   smallFoam: 0.5,
   seaLevel: 0,
   facetResolution: 190,
+  facetJitter: 0.34,
   lengthScale: 15,
   vertexDensity: 30,
   clipLevels: 8,
@@ -277,14 +283,14 @@ export const defaultOceanSettings: Readonly<OceanSettings> = {
   crestColor: '#35b9c8',
   shallowColor: '#57c7c2',
   deepColor: '#032d4b',
-  facetStrength: 0.82,
+  facetStrength: 0.7,
   detailNormalStrength: 1,
   normalScaleX: 1,
   normalScaleZ: 1,
   shadingContrast: 1.25,
   shadingBias: 0.08,
-  toneSteps: 7,
-  toneTransition: 0.35,
+  toneSteps: 4,
+  toneTransition: 0,
   colorPatches: true,
   patchScale: 11,
   patchStrength: 0.09,
