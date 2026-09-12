@@ -10,7 +10,7 @@ const controls = oceanControlGroups.flatMap((group) => [
 describe('ocean control contract', () => {
   it('only exposes unique, enabled controls', () => {
     const keys = controls.map((control) => control.key)
-    expect(keys).toHaveLength(75)
+    expect(keys).toHaveLength(79)
     expect(new Set(keys).size).toBe(keys.length)
     expect(controls.every((control) => !control.disabled)).toBe(true)
   })

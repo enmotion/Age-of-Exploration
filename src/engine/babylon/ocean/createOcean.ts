@@ -15,17 +15,7 @@ export interface OceanRuntime {
   dispose(): void
 }
 
-const waveUniforms = [
-  'time',
-  'waveDirection0',
-  'waveDirection1',
-  'waveDirection2',
-  'waveLength',
-  'waveAmplitude',
-  'waveSpeed',
-  'horizontalScale',
-  'chop',
-]
+const waveUniforms = ['time', 'chop', 'waveA', 'waveB', 'waveRms']
 
 function linearColor(value: string) {
   return BABYLON.Color3.FromHexString(value).toLinearSpace()
@@ -44,11 +34,6 @@ function standardMaterial(
   if (emissiveScale > 0)
     result.emissiveColor = result.diffuseColor.scale(emissiveScale)
   return result
-}
-
-function direction(degrees: number) {
-  const radians = BABYLON.Tools.ToRadians(degrees)
-  return new BABYLON.Vector2(Math.cos(radians), Math.sin(radians))
 }
 
 /**
@@ -138,85 +123,155 @@ function waveAmplitudes(settings: OceanSettings) {
   )
 }
 
-function setWaveUniforms(
-  target: BABYLON.ShaderMaterial,
-  settings: OceanSettings,
-) {
-  target.setVector2('waveDirection0', direction(settings.swellDirection))
-  target.setVector2('waveDirection1', direction(settings.windDirection))
-  target.setVector2('waveDirection2', direction(settings.windDirection + 53))
-  target.setVector3(
-    'waveLength',
-    new BABYLON.Vector3(
-      Math.max(2, settings.largeLength),
-      Math.max(1, settings.mediumLength),
-      Math.max(0.4, settings.smallLength),
-    ),
-  )
-  target.setVector3('waveAmplitude', waveAmplitudes(settings))
-  target.setVector3(
-    'waveSpeed',
-    new BABYLON.Vector3(
-      Math.max(0.04, settings.swellWind * 0.18),
-      Math.max(0.06, settings.windSpeed * 0.34),
-      Math.max(0.1, settings.windSpeed * 0.72),
-    ),
-  )
-  target.setVector3(
-    'horizontalScale',
-    new BABYLON.Vector3(
-      settings.largeHorizontal,
-      settings.mediumHorizontal,
-      settings.smallHorizontal,
-    ),
-  )
-  target.setFloat('chop', settings.lambda)
+type WaveComponent = {
+  dirX: number
+  dirZ: number
+  length: number
+  speed: number
+  amplitude: number
+  phase: number
+  horizontal: number
+  band: number
 }
 
-function sampleWave(
-  x: number,
-  z: number,
-  time: number,
-  settings: OceanSettings,
-) {
+const WAVE_COMPONENTS_PER_BAND = 8
+/** 波长在带内按无理因子铺开。原先带内是固定有理比 1 : 0.64 : 0.41，会形成空间周期性。 */
+const WAVE_LENGTH_SPREAD = 1.3247
+const WAVE_SPREAD_OCTAVES = 2.4
+/** 确定性伪随机：只用于生成分量表，逐帧结果完全可复现。 */
+function waveHash(value: number) {
+  const result = Math.sin(value * 127.1 + 311.7) * 43758.5453
+  return result - Math.floor(result)
+}
+
+/**
+ * 生成整个波场的分量表。着色器与 CPU 浮力采样共用这一份，
+ * 保证船体高度与渲染出的海面严格一致。
+ *
+ * 旧实现每条波带只有 3 个正弦、带内振幅比固定为 1 : 0.2 : 0.1，
+ * 导致带内主分量独占 91% 能量、整个波场里「大波主分量」独占 68%，
+ * 大尺度看上去就是一个单方向正弦——已改为每带 8 个分量、
+ * 波长按无理比铺开、方向带散布、谱形围绕带中心衰减。
+ */
+function buildWaveComponents(settings: OceanSettings): WaveComponent[] {
   const amplitudes = waveAmplitudes(settings)
-  const waves = [
+  const bands = [
     {
-      direction: direction(settings.swellDirection),
       length: Math.max(2, settings.largeLength),
       speed: Math.max(0.04, settings.swellWind * 0.18),
       amplitude: amplitudes.x,
-      phase: 0,
+      direction: settings.swellDirection,
+      horizontal: settings.largeHorizontal,
     },
     {
-      direction: direction(settings.windDirection),
       length: Math.max(1, settings.mediumLength),
       speed: Math.max(0.06, settings.windSpeed * 0.34),
       amplitude: amplitudes.y,
-      phase: 1.73,
+      direction: settings.windDirection,
+      horizontal: settings.mediumHorizontal,
     },
     {
-      direction: direction(settings.windDirection + 53),
       length: Math.max(0.4, settings.smallLength),
       speed: Math.max(0.1, settings.windSpeed * 0.72),
       amplitude: amplitudes.z,
-      phase: 3.46,
+      direction: settings.windDirection + 53,
+      horizontal: settings.smallHorizontal,
     },
   ]
-  return waves.reduce((height, wave) => {
-    const phase =
-      ((x * wave.direction.x + z * wave.direction.y) * Math.PI * 2) /
-        wave.length +
-      time * wave.speed +
-      wave.phase
-    return (
-      height +
-      (Math.sin(phase) +
-        Math.sin(phase * 2.07 + 1.1) * 0.18 +
-        Math.sin(phase * 3.91 - 0.6) * 0.07) *
-        wave.amplitude
+
+  const components: WaveComponent[] = []
+  bands.forEach((band, bandIndex) => {
+    const lengths: number[] = []
+    const weights: number[] = []
+    for (let index = 0; index < WAVE_COMPONENTS_PER_BAND; index += 1) {
+      const t = index / (WAVE_COMPONENTS_PER_BAND - 1)
+      lengths.push(
+        band.length *
+          Math.pow(WAVE_LENGTH_SPREAD, (t - 0.5) * WAVE_SPREAD_OCTAVES),
+      )
+      const offset = (t - 0.5) / 0.28
+      weights.push(Math.exp(-0.5 * offset * offset))
+    }
+    const weightNorm = Math.sqrt(
+      weights.reduce((sum, weight) => sum + weight * weight, 0),
     )
-  }, 0)
+    // 保持该带原有总能量：sum(振幅²) 与旧的 0.72² + 0.2² + 0.1² 相当
+    const energy = band.amplitude * Math.sqrt(0.72 ** 2 + 0.2 ** 2 + 0.1 ** 2)
+
+    for (let index = 0; index < WAVE_COMPONENTS_PER_BAND; index += 1) {
+      const t = index / (WAVE_COMPONENTS_PER_BAND - 1)
+      const length = lengths[index]!
+      const seed = bandIndex * 31 + index * 7.7
+      // 短波方向散布更大：真实海面的短波更受局地风扰动
+      const spread = (20 + 40 * t) * (waveHash(seed) - 0.5) * 2
+      const radians = BABYLON.Tools.ToRadians(band.direction + spread)
+      components.push({
+        dirX: Math.cos(radians),
+        dirZ: Math.sin(radians),
+        length,
+        // 深水重力波 c ∝ √L，取代原先固定 1.34 / 1.77 的速度比
+        speed: band.speed * Math.sqrt(length / band.length),
+        amplitude: (energy * weights[index]!) / weightNorm,
+        phase: waveHash(seed + 101.3) * Math.PI * 2,
+        horizontal: band.horizontal,
+        band: bandIndex,
+      })
+    }
+  })
+  return components
+}
+
+function setWaveUniforms(
+  target: BABYLON.ShaderMaterial,
+  components: WaveComponent[],
+  settings: OceanSettings,
+) {
+  const data: number[] = []
+  const shape: number[] = []
+  for (const component of components) {
+    data.push(component.dirX, component.dirZ, component.length, component.speed)
+    shape.push(
+      component.amplitude,
+      component.phase,
+      component.horizontal,
+      component.band,
+    )
+  }
+  target.setArray4('waveA', data)
+  target.setArray4('waveB', shape)
+  // 各带总高度的均方根：独立相位下 sum(a²)/2 的平方根。着色器用它归一化浪脊信号。
+  const energy = [0, 0, 0]
+  for (const component of components) {
+    energy[component.band] =
+      (energy[component.band] ?? 0) + component.amplitude * component.amplitude
+  }
+  const rms = energy.map((value) => Math.sqrt(Math.max(0.0001, value / 2)))
+  target.setVector3('waveRms', new BABYLON.Vector3(rms[0]!, rms[1]!, rms[2]!))
+  target.setFloat('chop', settings.lambda)
+}
+
+/** 与着色器 evaluateOcean 同构的 CPU 采样，用于船体浮力与尾迹高度。 */
+function sampleWave(
+  components: WaveComponent[],
+  x: number,
+  z: number,
+  time: number,
+) {
+  let height = 0
+  for (const component of components) {
+    const k = (Math.PI * 2) / Math.max(component.length, 0.2)
+    const phase =
+      (x * component.dirX + z * component.dirZ) * k +
+      time * component.speed +
+      component.phase
+    const s = Math.sin(phase)
+    const plateau = 1.4
+    const nrm = Math.sqrt(1 + plateau * plateau)
+    height +=
+      ((s * nrm) / Math.sqrt(1 + s * s * plateau * plateau)) *
+      component.amplitude
+  }
+  return height
 }
 
 function createShip(scene: BABYLON.Scene) {
@@ -349,6 +404,33 @@ function createShip(scene: BABYLON.Scene) {
   return root
 }
 
+/**
+ * 岛屿位置与缩放。网格与近岸距离场共用这一份数据，避免两边各写一遍而漂移。
+ * 岸线半径 = 圆柱底半径 9.5 米 × scale。
+ */
+const ISLANDS: ReadonlyArray<{ x: number; z: number; scale: number }> = [
+  { x: -58, z: 137, scale: 0.72 },
+  { x: 65, z: 170, scale: 1.05 },
+  { x: 43, z: 103, scale: 0.5 },
+  { x: -38, z: 92, scale: 0.38 },
+  { x: -44, z: 235, scale: 2.15 },
+]
+const SHORE_RADIUS_PER_SCALE = 9.5
+const MAX_ISLAND_UNIFORMS = 8
+
+function islandUniforms() {
+  const data: number[] = []
+  for (let index = 0; index < MAX_ISLAND_UNIFORMS; index += 1) {
+    const island = ISLANDS[index]
+    data.push(
+      island?.x ?? 0,
+      island?.z ?? 0,
+      (island?.scale ?? 0) * SHORE_RADIUS_PER_SCALE,
+    )
+  }
+  return data
+}
+
 function createIsland(
   scene: BABYLON.Scene,
   x: number,
@@ -460,6 +542,8 @@ function createWake(scene: BABYLON.Scene) {
         'brightness',
         'wakeColor',
         'wakeWaterColor',
+        'cellSize',
+        'gridOffset',
       ],
       needAlphaBlending: true,
     },
@@ -476,83 +560,6 @@ function createWake(scene: BABYLON.Scene) {
   mesh.material = shader
   mesh.renderingGroupId = 1
   return { mesh, shader }
-}
-
-type WakeRibbon = {
-  mesh: BABYLON.Mesh
-  side: number
-  progress: number[]
-  outer: BABYLON.Vector3[]
-  inner: BABYLON.Vector3[]
-}
-
-function createWakeRibbons(scene: BABYLON.Scene) {
-  const foamMaterial = standardMaterial(scene, 'wake-ribbon-foam', '#fffaf0')
-  foamMaterial.disableLighting = true
-  foamMaterial.emissiveColor = new BABYLON.Color3(0.92, 1, 0.98)
-  foamMaterial.alpha = 0.88
-  foamMaterial.backFaceCulling = false
-  const ribbons: WakeRibbon[] = []
-  for (let side = -1; side <= 1; side += 2) {
-    for (let segment = 0; segment < 11; segment += 1) {
-      if (segment === 3 || segment === 7) continue
-      const progress: number[] = []
-      const outer: BABYLON.Vector3[] = []
-      const inner: BABYLON.Vector3[] = []
-      for (let point = 0; point < 5; point += 1) {
-        const t = (segment + point / 4) / 11
-        progress.push(t)
-        outer.push(new BABYLON.Vector3(side * (1 + t * 8), 0.2, 8 - t * 72))
-        inner.push(
-          new BABYLON.Vector3(side * (0.6 + t * 7.3), 0.21, 8 - t * 72),
-        )
-      }
-      const mesh = BABYLON.MeshBuilder.CreateRibbon(
-        `wake-ribbon-${side}-${segment}`,
-        { pathArray: [outer, inner], updatable: true },
-        scene,
-      )
-      mesh.material = foamMaterial
-      mesh.renderingGroupId = 2
-      ribbons.push({ mesh, side, progress, outer, inner })
-    }
-  }
-  return { ribbons, material: foamMaterial }
-}
-
-function updateWakeRibbons(
-  wake: ReturnType<typeof createWakeRibbons>,
-  settings: OceanSettings,
-  time: number,
-) {
-  const wakeLength = Math.max(12, settings.wakeLifetime * 8)
-  const angle = BABYLON.Tools.ToRadians(settings.wakeAngle) * 0.5
-  for (const ribbon of wake.ribbons) {
-    ribbon.progress.forEach((progress, index) => {
-      const distance = progress * wakeLength
-      const z = 8 - distance
-      const arm =
-        settings.wakeInitialWidth +
-        distance * Math.tan(angle) * settings.wakeSpreadSpeed
-      const flutter =
-        Math.sin(progress * 47 + ribbon.side * 1.7) * (0.15 + progress * 0.75)
-      const width = 0.5 + progress
-      const y =
-        settings.seaLevel +
-        settings.wakeWaterOffset +
-        sampleWave(ribbon.side * arm, z, time, settings)
-      ribbon.outer[index]!.set(ribbon.side * arm + flutter, y, z)
-      ribbon.inner[index]!.set(
-        ribbon.side * (arm - width) + flutter,
-        y + 0.015,
-        z,
-      )
-    })
-    BABYLON.MeshBuilder.CreateRibbon(ribbon.mesh.name, {
-      pathArray: [ribbon.outer, ribbon.inner],
-      instance: ribbon.mesh,
-    })
-  }
 }
 
 function sunVector(settings: OceanSettings) {
@@ -656,6 +663,7 @@ export async function createOcean(
       { diameter: 6, segments: 18 },
       scene,
     )
+    sunDiscMaterial.fogEnabled = false
     sunDisc.material = sunDiscMaterial
     sunDisc.setEnabled(false)
     const moonDiscMaterial = standardMaterial(scene, 'moon-disc', '#dce9ff')
@@ -666,6 +674,7 @@ export async function createOcean(
       { diameter: 5, segments: 18 },
       scene,
     )
+    moonDiscMaterial.fogEnabled = false
     moonDisc.material = moonDiscMaterial
 
     const oceanUniforms = [
@@ -703,7 +712,6 @@ export async function createOcean(
       'highlightSharpness',
       'glintScale',
       'glintAspect',
-      'glintAngle',
       'glintThreshold',
       'glintDistortion',
       'crestFoam',
@@ -724,6 +732,11 @@ export async function createOcean(
       'sssStrength',
       'sssBase',
       'sssScale',
+      'shallowColor',
+      'islands',
+      'islandCount',
+      'contactFoam',
+      'foamContact',
       'fogMode',
       'fogStart',
       'fogEnd',
@@ -749,14 +762,13 @@ export async function createOcean(
     const cloudMaterials = scene.materials.filter((entry) =>
       entry.name.startsWith('cloud-'),
     ) as BABYLON.StandardMaterial[]
-    createIsland(scene, -58, 137, 0.72)
-    createIsland(scene, 65, 170, 1.05)
-    createIsland(scene, 43, 103, 0.5)
-    createIsland(scene, -38, 92, 0.38)
-    createIsland(scene, -44, 235, 2.15)
+    ISLANDS.forEach((island) =>
+      createIsland(scene, island.x, island.z, island.scale),
+    )
     const wake = createWake(scene)
-    const wakeRibbons = createWakeRibbons(scene)
+    wake.shader.setFloat('gridOffset', SEA_EXTENT / 2)
 
+    let waveComponents = buildWaveComponents(initial)
     let settings = { ...initial }
     let previous = { ...initial }
     let clock = initial.timeOffset
@@ -768,7 +780,9 @@ export async function createOcean(
     /** 用新的细分段数重建海面网格；先建后删，重建失败时保留旧网格。 */
     const rebuildSea = (segments: number) => {
       // cellSize 与网格必须同步更新，否则面片 ID 会和真实面片错位。
+      // 尾迹泡沫也用同一套面片格，所以两边都要设。
       ocean.setFloat('cellSize', SEA_EXTENT / segments)
+      wake.shader.setFloat('cellSize', SEA_EXTENT / segments)
       if (segments === seaSegments) return
       const previousMesh = sea
       sea = createSeaMesh(scene, segments)
@@ -831,9 +845,6 @@ export async function createOcean(
       wake.mesh.position.y = next.seaLevel
       ocean.wireframe = next.wireframe
       wake.mesh.setEnabled(next.wakeEnabled)
-      wakeRibbons.ribbons.forEach((ribbon) =>
-        ribbon.mesh.setEnabled(next.wakeEnabled),
-      )
 
       const sunPosition = sunVector(next)
       const lightDirection = sunPosition.scale(-1)
@@ -872,7 +883,8 @@ export async function createOcean(
         )
       })
 
-      setWaveUniforms(ocean, next)
+      waveComponents = buildWaveComponents(next)
+      setWaveUniforms(ocean, waveComponents, next)
       ocean.setColor3('deepColor', linearColor(next.valleyColor))
       ocean.setColor3('midColor', linearColor(next.waterColor))
       ocean.setColor3('slopeColor', linearColor(next.slopeColor))
@@ -900,7 +912,7 @@ export async function createOcean(
       ocean.setFloat('slopeColorBias', next.slopeColorBias)
       ocean.setFloat('lightColorStrength', next.lightColorStrength)
       ocean.setFloat('saturation', next.saturation)
-      ocean.setFloat('brightness', next.brightness * (1 - nightAmount * 0.6))
+      ocean.setFloat('brightness', next.brightness * (1 - nightAmount * 0.25))
       ocean.setFloat('fresnelStrength', next.fresnelStrength)
       ocean.setFloat('fresnelBias', next.fresnelBias)
       ocean.setFloat('roughness', next.roughness)
@@ -911,7 +923,6 @@ export async function createOcean(
       ocean.setFloat('highlightSharpness', next.highlightSharpness)
       ocean.setFloat('glintScale', next.glintScale)
       ocean.setFloat('glintAspect', next.glintAspect)
-      ocean.setFloat('glintAngle', next.glintAngle)
       ocean.setFloat('glintThreshold', next.glintThreshold)
       ocean.setFloat('glintDistortion', next.glintDistortion)
       ocean.setFloat('crestFoam', next.crestFoam ? 1 : 0)
@@ -942,6 +953,13 @@ export async function createOcean(
       )
       ocean.setFloat('foamFadeStart', next.foamFadeStart)
       ocean.setFloat('foamFadeEnd', next.foamFadeEnd)
+      ocean.setColor3('shallowColor', linearColor(next.shallowColor))
+      ocean.setFloat('shallowStart', next.shallowStart)
+      ocean.setFloat('shallowEnd', next.shallowEnd)
+      ocean.setArray3('islands', islandUniforms())
+      ocean.setFloat('islandCount', ISLANDS.length)
+      ocean.setFloat('contactFoam', next.contactFoam ? 1 : 0)
+      ocean.setFloat('foamContact', next.foamContact)
       ocean.setFloat('sssStrength', next.sssStrength)
       ocean.setFloat('sssBase', next.sssBase)
       ocean.setFloat('sssScale', next.sssScale)
@@ -958,9 +976,22 @@ export async function createOcean(
       ocean.setFloat('fogStart', next.fogStart)
       ocean.setFloat('fogEnd', next.fogEnd)
       ocean.setFloat('fogDensity', next.fogDensity)
+      // 让岛屿、云等标准材质也吃到同一套空气透视；天空盒与日月光盘是自绘的，不受 scene fog 影响。
+      scene.fogMode =
+        next.fogMode === 'linear'
+          ? BABYLON.Scene.FOGMODE_LINEAR
+          : next.fogMode === 'exp'
+            ? BABYLON.Scene.FOGMODE_EXP
+            : next.fogMode === 'exp2'
+              ? BABYLON.Scene.FOGMODE_EXP2
+              : BABYLON.Scene.FOGMODE_NONE
+      scene.fogColor = BABYLON.Color3.FromHexString(next.fogColor)
+      scene.fogStart = next.fogStart
+      scene.fogEnd = next.fogEnd
+      scene.fogDensity = next.fogDensity
       ocean.setFloat('stylized', next.stylized ? 1 : 0)
 
-      setWaveUniforms(wake.shader, next)
+      setWaveUniforms(wake.shader, waveComponents, next)
       wake.shader.setFloat('waterOffset', next.wakeWaterOffset)
       wake.shader.setFloat('originZ', 8)
       wake.shader.setFloat('wakeLength', Math.max(12, next.wakeLifetime * 8))
@@ -972,11 +1003,6 @@ export async function createOcean(
       wake.shader.setFloat('brightness', next.wakeBrightness)
       wake.shader.setColor3('wakeColor', linearColor(next.wakeColor))
       wake.shader.setColor3('wakeWaterColor', linearColor(next.wakeWaterColor))
-      const wakeRibbonColor = BABYLON.Color3.FromHexString(next.wakeColor)
-      wakeRibbons.material.diffuseColor.copyFrom(wakeRibbonColor)
-      wakeRibbons.material.emissiveColor.copyFrom(
-        wakeRibbonColor.scale(Math.max(0.2, next.wakeBrightness * 1.15)),
-      )
 
       sky.setVector3('sunDirection', lightDirection)
       sky.setFloat(
@@ -1021,7 +1047,7 @@ export async function createOcean(
       wake.shader.setFloat('time', clock)
       sky.setFloat('time', clock)
 
-      const shipHeight = sampleWave(0, 10, clock, settings)
+      const shipHeight = sampleWave(waveComponents, 0, 10, clock)
       ship.position.y =
         settings.seaLevel +
         settings.buoyOffset +
@@ -1036,7 +1062,6 @@ export async function createOcean(
           ? Math.sin(clock * 0.36) * 0.045 * settings.rollScale
           : 0,
       )
-      if (settings.wakeEnabled) updateWakeRibbons(wakeRibbons, settings, clock)
       const currentSun = sunVector(settings)
       sunDisc.position
         .copyFrom(camera.position)

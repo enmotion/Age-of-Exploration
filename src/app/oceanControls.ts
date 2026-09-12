@@ -209,6 +209,17 @@ export const oceanControlGroups: OceanControlGroup[] = [
     ],
   },
   {
+    id: 'shore',
+    title: '近岸与接触白沫',
+    description: '岛岸附近的水色变浅与岸线白沫环',
+    controls: [
+      color('shallowColor', '近岸浅水色'),
+      bounded('shallowEnd', '浅水范围 m', 1, 120, 1),
+      check('contactFoam', '启用接触白沫'),
+      bounded('foamContact', '接触白沫强度', 0, 2, 0.05),
+    ],
+  },
+  {
     id: 'vessel',
     title: '船体、尾迹与浮力',
     description: '船体随相同波场运动，尾迹独立着色',

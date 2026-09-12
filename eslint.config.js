@@ -20,7 +20,7 @@ export default ts.config(
   ...ts.configs.recommended,
   ...vue.configs['flat/recommended'],
   {
-    files: ['**/*.{ts,js,vue}'],
+    files: ['**/*.{ts,js,mjs,vue}'],
     languageOptions: { globals: { ...globals.browser, ...globals.node } },
   },
   {
