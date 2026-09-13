@@ -747,7 +747,7 @@ export async function createOcean(
     moonDiscMaterial.emissiveColor = new BABYLON.Color3(0.82, 0.9, 1.3)
     const moonDisc = BABYLON.MeshBuilder.CreateSphere(
       'moon-disc',
-      { diameter: 5, segments: 18 },
+      { diameter: 10, segments: 18 },
       scene,
     )
     moonDiscMaterial.fogEnabled = false
@@ -758,6 +758,10 @@ export async function createOcean(
       'worldViewProjection',
       'cameraPosition',
       'sunDirection',
+      'moonDirection',
+      'reflectionMatrix',
+      'seaLevel',
+      'reflectionTexel',
       ...waveUniforms,
       'deepColor',
       'midColor',
@@ -833,7 +837,11 @@ export async function createOcean(
       'low-poly-ocean',
       scene,
       { vertexSource: oceanVertex, fragmentSource: oceanFragment },
-      { attributes: ['position', 'ringCellSize'], uniforms: oceanUniforms },
+      {
+        attributes: ['position', 'ringCellSize'],
+        uniforms: oceanUniforms,
+        samplers: ['sceneReflection'],
+      },
     )
     ocean.backFaceCulling = false
     const initialLayout = seaRingLayout(
@@ -857,6 +865,31 @@ export async function createOcean(
       createIsland(scene, island.x, island.z, island.scale),
     )
     const wake = createWake(scene)
+    // One half-resolution scene capture, excluding water to prevent recursion.
+    const reflection = new BABYLON.MirrorTexture(
+      'ocean-scene-reflection',
+      { ratio: 0.5 },
+      scene,
+      false,
+    )
+    reflection.clearColor = new BABYLON.Color4(0, 0, 0, 0)
+    reflection.renderList = scene.meshes.filter(
+      (mesh) =>
+        !sea.includes(mesh as BABYLON.Mesh) &&
+        mesh !== wake.mesh &&
+        mesh !== skyMesh &&
+        mesh !== sunDisc &&
+        mesh !== moonDisc,
+    )
+    const reflectionMatrix = BABYLON.Matrix.Identity()
+    reflection.onBeforeRenderObservable.add(() => {
+      reflectionMatrix.copyFrom(scene.getTransformMatrix())
+      ocean.setMatrix('reflectionMatrix', reflectionMatrix)
+    })
+    scene.customRenderTargets.push(reflection)
+    ocean.setTexture('sceneReflection', reflection)
+    const moonDirection = new BABYLON.Vector3(-0.1, 0.22, 0.97).normalize()
+    ocean.setVector3('moonDirection', moonDirection)
     // 尾迹泡沫用最内环的格子，格点原点就是世界原点（各环半宽都是格子的整数倍）。
     wake.shader.setFloat('gridOffset', 0)
 
@@ -865,6 +898,7 @@ export async function createOcean(
     let previous = { ...initial }
     let clock = initial.timeOffset
     let last = performance.now()
+    let lastDiagnostics = 0
     let disposed = false
     let pendingSeaRebuild: ReturnType<typeof setTimeout> | undefined
     let lastSeaRebuildAt = 0
@@ -940,6 +974,8 @@ export async function createOcean(
       sun.intensity = 1.22 * next.lightIntensity
       applySeaResolution(next, first)
       sea.forEach((mesh) => (mesh.position.y = next.seaLevel))
+      reflection.mirrorPlane = new BABYLON.Plane(0, -1, 0, next.seaLevel)
+      ocean.setFloat('seaLevel', next.seaLevel)
       wake.mesh.position.y = next.seaLevel
       ocean.wireframe = next.wireframe
       wake.mesh.setEnabled(next.wakeEnabled)
@@ -988,14 +1024,7 @@ export async function createOcean(
       ocean.setColor3('slopeColor', linearColor(next.slopeColor))
       ocean.setColor3('crestColor', linearColor(next.crestColor))
       ocean.setColor3('foamColor', linearColor(next.foamColor))
-      ocean.setColor3(
-        'highlightColor',
-        BABYLON.Color3.Lerp(
-          linearColor(next.highlightColor),
-          linearColor('#bedcff'),
-          nightAmount,
-        ),
-      )
+      ocean.setColor3('highlightColor', linearColor(next.highlightColor))
       ocean.setColor3('sssColor', linearColor(next.sssColor))
       ocean.setColor3('fogColor', linearColor(next.fogColor))
       ocean.setFloat('facetStrength', next.facetStrength)
@@ -1153,6 +1182,19 @@ export async function createOcean(
       if (!settings.animationPaused) clock += dt * settings.animationSpeed
       ocean.setFloat('time', clock)
       ocean.setVector3('cameraPosition', camera.position)
+      const reflectionSize = reflection.getSize()
+      if (now - lastDiagnostics > 1000) {
+        canvas.dataset.renderFps = engine.getFps().toFixed(1)
+        canvas.dataset.reflectionSize = `${reflectionSize.width}x${reflectionSize.height}`
+        lastDiagnostics = now
+      }
+      ocean.setVector2(
+        'reflectionTexel',
+        new BABYLON.Vector2(
+          1 / reflectionSize.width,
+          1 / reflectionSize.height,
+        ),
+      )
       ocean.setVector3('sunDirection', sun.direction)
       wake.shader.setFloat('time', clock)
       sky.setFloat('time', clock)

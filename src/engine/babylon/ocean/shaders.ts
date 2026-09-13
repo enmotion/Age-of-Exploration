@@ -99,7 +99,7 @@ export const skyShared = /* glsl */ `
 // 天空基色：天空着色器与海面着色器**共用这一份实现**。
 // 海天交界要严丝合缝，两边的颜色必须逐项一致——只调雾色是调不准的。
 // 不含云与星空（那两项只在天空着色器里叠加）。
-vec3 skyBaseColor(vec3 d, float turbidity, float rayleigh, float mie, float nightAmount) {
+vec3 skyRadiance(vec3 d, float turbidity, float rayleigh, float mie, float nightAmount, float discContribution) {
   float sunset = 1.0 - smoothstep(.04, .24, -sunDirection.y);
   vec3 horizon = mix(vec3(.50,.77,.91), vec3(1.0,.36,.10), sunset*.9);
   vec3 zenith = mix(vec3(.08,.38,.72), vec3(.52,.20,.28), sunset*.85);
@@ -109,13 +109,29 @@ vec3 skyBaseColor(vec3 d, float turbidity, float rayleigh, float mie, float nigh
   sky = mix(sky, horizon, haze*.35);
   sky = mix(sky, vec3(.008,.025,.09), nightAmount*.94);
   vec3 sunDir = normalize(-sunDirection);
-  float sun = pow(max(dot(d, sunDir), 0.0), 4000.0);
+  float sun = pow(max(dot(d, sunDir), 0.0), 4000.0)*discContribution;
   sky += mix(vec3(1.0,.9,.65), vec3(1.0,.37,.12), sunset)*sun*2.8*(1.0-nightAmount);
   float sunGlow = pow(max(dot(d, sunDir), 0.0), 6.0);
   sky += vec3(1.0,.44,.16)*sunGlow*sunset*.5*(1.0-nightAmount);
   sky *= mix(.72,1.28,clamp(rayleigh/4.0,0.0,1.0));
   sky += vec3(1.0,.72,.42)*mie*sun*18.0;
   return sky;
+}
+vec3 skyBaseColor(vec3 d, float turbidity, float rayleigh, float mie, float nightAmount) {
+ return skyRadiance(d,turbidity,rayleigh,mie,nightAmount,1.0);
+}
+float skyNoise(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.0-2.0*f);vec4 h=fract(sin(vec4(dot(i,vec2(127.1,311.7)),dot(i+vec2(1,0),vec2(127.1,311.7)),dot(i+vec2(0,1),vec2(127.1,311.7)),dot(i+vec2(1,1),vec2(127.1,311.7))))*43758.5453);return mix(mix(h.x,h.y,f.x),mix(h.z,h.w,f.x),f.y);}
+float skyCloudNoise(vec2 p){float v=0.0,a=.5;for(int i=0;i<5;i++){v+=a*skyNoise(p);p=p*2.03+17.1;a*=.5;}return v;}
+vec3 skyWithClouds(vec3 d,float turbidity,float rayleigh,float mie,float nightAmount,float t,float discContribution){
+ vec3 color=skyRadiance(d,turbidity,rayleigh,mie,nightAmount,discContribution);
+ if(d.y>.018){
+  vec2 uv=d.xz/(d.y+.16)*.53;
+  float cloud=smoothstep(.48,.67,skyCloudNoise(uv+vec2(t*.003,0)))*smoothstep(.018,.11,d.y)*(1.0-smoothstep(.56,.94,d.y));
+  float sunset=1.0-smoothstep(.04,.24,-sunDirection.y);
+  vec3 tint=mix(vec3(1,.94,.84),vec3(1,.54,.31),sunset*.65);
+  color=mix(color,tint,cloud*.82*(1.0-nightAmount*.72));
+ }
+ return color;
 }`
 
 export const oceanVertex = /* glsl */ `
@@ -166,6 +182,11 @@ varying vec2 vBase;
 varying float vFold;
 varying float vCellSize;
 uniform vec3 cameraPosition;
+uniform sampler2D sceneReflection;
+uniform mat4 reflectionMatrix;
+uniform float seaLevel;
+uniform vec2 reflectionTexel;
+uniform vec3 moonDirection;
 uniform vec3 sunDirection;
 uniform vec3 deepColor;
 uniform vec3 midColor;
@@ -251,6 +272,39 @@ float fbm(vec2 p) {
 }
 mat2 rotation(float angle){float c=cos(angle),s=sin(angle);return mat2(c,-s,s,c);}
 
+// Analytic gradient of compact simplex kernels: irregular, continuous slopes,
+// without the repeating interference pattern of a few fixed sine waves.
+vec2 rippleCorner(vec2 offset,vec2 cell){
+ float angle=hash(cell)*6.2831853;
+ vec2 gradient=vec2(cos(angle),sin(angle));
+ float support=max(.5-dot(offset,offset),0.0);
+ float cube=support*support*support;
+ return cube*support*gradient-8.0*cube*dot(gradient,offset)*offset;
+}
+vec2 rippleSlope(vec2 p){
+ vec2 cell=floor(p+(p.x+p.y)*.366025404);
+ vec2 a=p-cell+(cell.x+cell.y)*.211324865;
+ vec2 corner=a.x>a.y?vec2(1,0):vec2(0,1);
+ vec2 b=a-corner+.211324865;
+ vec2 c=a-1.0+.422649731;
+ return 70.0*(rippleCorner(a,cell)+rippleCorner(b,cell+corner)+rippleCorner(c,cell+1.0));
+}
+
+// The caller estimates filtering from first derivatives of world position only.
+// N contains a derivative-built face normal: differentiating N again is undefined.
+float waterSpecular(vec3 N,vec3 V,vec3 L,float alpha,float variance){
+ float nv=max(dot(N,V),.001),nl=max(dot(N,L),0.0);
+ vec3 H=normalize(V+L);
+ float nh=max(dot(N,H),0.0),vh=max(dot(V,H),0.0);
+ float a2=max(.001,alpha*alpha+variance);
+ float denom=nh*nh*(a2-1.0)+1.0;
+ float D=a2/(3.14159265*denom*denom);
+ float gv=2.0*nv/(nv+sqrt(a2+(1.0-a2)*nv*nv));
+ float gl=2.0*nl/max(.001,nl+sqrt(a2+(1.0-a2)*nl*nl));
+ float F=.0204+.9796*pow(1.0-vh,5.0);
+ return D*gv*gl*F/(4.0*nv);
+}
+
 void main() {
   vec3 faceNormal = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
   if (faceNormal.y < 0.0) faceNormal *= -1.0;
@@ -290,8 +344,6 @@ void main() {
   // 太阳沉到地平线以下后必须把暖色关掉，否则夜色会被染成紫红。
   float sunsetAmount=(1.0-smoothstep(.04,.24,sunElevation))*smoothstep(-.06,.02,sunElevation);
   float nightAmount=1.0-clamp((sunElevation+.08)/.28,0.0,1.0);
-  // 夜里太阳在地平线以下，镜面高光会整体熄灭，所以入夜后改用月亮作为光路光源。
-  vec3 lightToward=normalize(mix(-sunDirection,vec3(-.1,.22,.97),step(.5,nightAmount)));
   // 水体自身的昼夜染色必须放在反射**之前**：它描述的是"水本身"的颜色，
   // 放在反射之后会把刚混进去的天光反射整个盖掉——这正是之前"看不到倒影"的原因。
   // 夕阳对水体本身的作用是"去饱和压暗"而不是加暖：实测参考图的黄昏水体是暗中性紫
@@ -300,41 +352,54 @@ void main() {
   // 入夜改为混向月光蓝，而不是乘暗：参考图的夜晚水面依然看得清。
   water=mix(water,vec3(.16,.26,.46),nightAmount*.55);
 
-  float ndv=max(dot(normal,viewDir),0.0);
-  float fresnel=clamp((.025+.86*pow(1.0-ndv,4.0))*fresnelStrength+fresnelBias,0.0,1.0);
-  // 天光反射随太阳高度变色：低太阳角时换成暖橙，入夜后压成冷蓝。
-  // 天光反射：按**反射方向**求真实天空色，而不是写死的两色渐变。
-  // 复用与天空着色器同一份 skyBaseColor，于是天顶渐变、太阳位置、日落色温
-  // 都会出现在正确的地方——不需要任何额外渲染通道。
-  vec3 reflectDir=reflect(-viewDir,normal);
-  vec3 reflectedSky=pow(clamp(skyBaseColor(reflectDir,turbidity,rayleigh,mie,nightAmount)*skyLuminance,0.0,1.0),vec3(.92));
-  // 反射权重直接用菲涅尔反射率。旧代码在这里乘了 (.42+roughness*.22) ≈ 0.46，
-  // 那是为"写死的假天空渐变"调的——现在反射是真的，再乘就把强度砍掉一半多，
-  // 结果就是"看不到倒影"。
-  water=mix(water,reflectedSky,fresnel*(1.0-roughness*.35));
+  // Let real wave faces lead. Two rotated, elongated slope fields only break edges.
+  float frequency=.10+glintScale*.22;
+  vec2 pixelDx=dFdx(vWorld.xz),pixelDy=dFdy(vWorld.xz);
+  float footprint=max(length(pixelDx),length(pixelDy));
+  float resolved=1.0-smoothstep(.18,.85,footprint*frequency);
+  float fineResolved=1.0-smoothstep(.18,.85,footprint*frequency*2.13);
+  vec2 drift=vWorld.xz+vec2(time*.31,-time*.23);
+  vec2 p=rotation(.43)*drift*frequency;
+  vec2 coarse=rippleSlope(p*vec2(1.0,.43))*vec2(1.0,.43);
+  vec2 fine=rippleSlope(rotation(1.17)*p*2.13+vec2(31.7,8.3));
+  vec2 ripple=rotation(-.43)*(coarse*resolved+rotation(-1.17)*fine*.23*fineResolved);
+  float detailAmplitude=.012+glintDistortion*.018;
+  vec3 reflectionNormal=normalize(mix(vec3(0,1,0),normal,.85)+
+    vec3(ripple.x,0.0,ripple.y)*detailAmplitude);
+  float specularVariance=.002*(1.0-resolved)+.0015*smoothstep(.4,1.8,footprint/max(.001,vCellSize));
+  float ndv=max(dot(reflectionNormal,viewDir),0.0);
+  float fresnel=clamp((.0204+.9796*pow(1.0-ndv,5.0))*fresnelStrength+fresnelBias,0.0,1.0);
+  vec3 reflectDir=reflect(-viewDir,reflectionNormal);
+  vec3 reflectedSky=pow(clamp(skyWithClouds(reflectDir,turbidity,rayleigh,mie,nightAmount,time,0.0)*skyLuminance,0.0,1.0),vec3(.92));
+  // Project the mean water plane into the mirrored camera, then perturb within a bounded footprint.
+  vec4 projected=reflectionMatrix*vec4(vWorld.x,seaLevel,vWorld.z,1.0);
+  vec2 reflectionUV=projected.xy/max(.001,projected.w)*.5+.5;
+  vec2 perturb=reflectionNormal.xz*(.008+roughness*.012)/(1.0+facetViewDistance*.006);
+  reflectionUV+=vec2(perturb.x,-perturb.y);
+  vec2 blur=reflectionTexel*(.6+roughness*5.0);
+  vec2 safeUV=clamp(reflectionUV,blur*2.0,vec2(1.0)-blur*2.0);
+  vec4 reflected=texture2D(sceneReflection,safeUV)*.4;
+  reflected+=texture2D(sceneReflection,safeUV+vec2(blur.x,0))*.15;
+  reflected+=texture2D(sceneReflection,safeUV-vec2(blur.x,0))*.15;
+  reflected+=texture2D(sceneReflection,safeUV+vec2(0,blur.y))*.15;
+  reflected+=texture2D(sceneReflection,safeUV-vec2(0,blur.y))*.15;
+  float screenEdge=min(min(reflectionUV.x,1.0-reflectionUV.x),min(reflectionUV.y,1.0-reflectionUV.y));
+  float valid=smoothstep(.0,.035,screenEdge)*step(.001,projected.w);
+  vec3 environment=reflectedSky*(1.0-reflected.a*valid)+reflected.rgb*valid;
+  water=mix(water,environment,fresnel*(1.0-roughness*.25));
 
-  vec3 halfDir=normalize(viewDir+lightToward);
-  float spec=pow(max(dot(normal,halfDir),0.0),max(2.0,highlightSharpness));
-  // 碎金楔形带：太阳方位上才铺开反光，横向偏移越远越弱，越靠近观者越宽。
-  // 参考图里这是一条从地平线太阳一路拉到近景的暖金色带，不是全屏均匀的闪烁。
-  vec2 sunAz=normalize(lightToward.xz+vec2(1e-4,1e-4));
-  vec2 rel=vWorld.xz-cameraPosition.xz;
-  float along=dot(rel,sunAz);
-  float lateral=abs(dot(rel,vec2(-sunAz.y,sunAz.x)));
-  // 参考图的光路在屏幕上近似等宽，对应到世界空间就是随距离线性张开，
-  // 而不是渐开到一个固定宽度（那样近景会整片糊满）。glintAspect 控制张角。
-  float bandWidth=max(.5,along*(.04+glintScale*.16)*(1.0+glintAspect*.04));
-  float wobble=1.0+(fbm(vWorld.xz*.06)-.5)*glintDistortion;
-  float band=(1.0-smoothstep(bandWidth*.45,bandWidth*wobble,lateral))*smoothstep(-4.0,22.0,along);
-  // 逐面片镜面：朝向太阳的面片整片一起亮，得到参考图的成片金色面片而不是点阵。
-  float sparkle=step(glintThreshold,spec*(.45+hash(facetCell+7.3)*1.1)*band);
-  float glint=sparkle*band;
-  // 碎金是把水面"推向暖金色"，不是叠加一层白光——加法在这么大面积上会直接过曝成白斑。
-  water=mix(water,highlightColor,clamp(glint*highlightStrength*.55,0.0,.8));
-  // 普通高光也必须被楔形带门控：它的波瓣很宽，不门控会把暖色糊满整个下半屏，
-  // 看起来像水里漂着大片米色斑块，而不是一条朝向太阳的光路。
-  water+=highlightColor*spec*band*highlightStrength*.5;
-
+  float alpha=clamp(sqrt(2.0/(highlightSharpness+2.0))*(.65+roughness),.055,.5);
+  float sunVisible=smoothstep(-.025,.06,sunElevation);
+  float moonVisible=smoothstep(.2,.95,nightAmount);
+  float sunSpec=waterSpecular(reflectionNormal,viewDir,normalize(-sunDirection),alpha,specularVariance);
+  float moonSpec=waterSpecular(reflectionNormal,viewDir,normalize(moonDirection),alpha*.75,specularVariance);
+  float response=exp2(-glintThreshold*1.5);
+  vec3 sunTint=mix(highlightColor,vec3(1.0,.50,.18),sunsetAmount*.6);
+  vec3 moonTint=vec3(.82,.90,1.0);
+  vec3 radiance=sunTint*sunSpec*sunVisible*12.0+moonTint*moonSpec*moonVisible*6.0;
+  // Soft photographic shoulder, instead of a binary gold-colour mask.
+  radiance*=highlightStrength*response;
+  water+=radiance/(1.0+max(radiance.r,max(radiance.g,radiance.b)))*.9;
   // ---- 白沫主项：位移雅可比（折叠度）----
   // 参考实现用的是同一判据，只是它把折叠度写进一张持久纹理做时间累积；
   // 这里先用瞬时值，等缓冲链路打通再加上衰减，白沫就会带上"记忆"。
@@ -442,8 +507,7 @@ void main(){
  vec3 d=normalize(vPos);
  float sunset=1.0-smoothstep(.04,.24,-sunDirection.y);
  // 天空基色与海面共用同一份实现，海天交界才能对齐
- vec3 sky=skyBaseColor(d,turbidity,rayleigh,mie,nightAmount);
- if(d.y>.018){vec2 uv=d.xz/(d.y+.16)*.53;float cloud=smoothstep(.48,.67,fbm(uv+vec2(time*.003,0.0)));cloud*=smoothstep(.018,.11,d.y)*(1.0-smoothstep(.56,.94,d.y));vec3 cloudColor=mix(vec3(1.0,.94,.84),vec3(1.0,.54,.31),sunset*.65);sky=mix(sky,cloudColor,cloud*.82*(1.0-nightAmount*.72));}
+ vec3 sky=skyWithClouds(d,turbidity,rayleigh,mie,nightAmount,time,1.0);
  float stars=step(.985,hash(floor(d.xz*420.0/(d.y+.35))))*smoothstep(.12,.65,d.y)*nightAmount;
  sky+=vec3(.74,.86,1.0)*stars;
  gl_FragColor=vec4(pow(clamp(sky*luminance,0.0,1.0),vec3(.92)),1.0);

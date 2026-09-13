@@ -53,9 +53,9 @@ test('runs the art-directed ocean and only exposes live controls', async ({
     await foam.evaluate((input: HTMLInputElement) => input.checkValidity()),
   ).toBe(true)
 
-  await expect(page.locator('.control-row')).toHaveCount(83)
+  await expect(page.locator('.control-row')).toHaveCount(85)
   await expect(page.locator('.control-row.is-disabled')).toHaveCount(0)
-  await expect(canvas).toHaveAttribute('data-active-controls', '83')
+  await expect(canvas).toHaveAttribute('data-active-controls', '85')
   await expect(canvas).toHaveAttribute('data-inactive-controls', '0')
 
   await page.getByRole('button', { name: '黄昏', exact: true }).click()
@@ -80,5 +80,44 @@ test('runs the art-directed ocean and only exposes live controls', async ({
         document.documentElement.scrollHeight === innerHeight,
     ),
   ).toBe(true)
+  expect(errors).toEqual([])
+})
+
+test('reflection controls change paused water and all lighting presets render', async ({
+  page,
+}) => {
+  const errors: string[] = []
+  page.on('pageerror', (error) => errors.push(error.message))
+  page.on('console', (message) => {
+    if (message.type() === 'error') errors.push(message.text())
+  })
+  await page.goto('/')
+  const canvas = page.locator('canvas')
+  await expect(canvas).toHaveAttribute('data-ready', 'true', { timeout: 45000 })
+  await page.getByRole('button', { name: '暂停', exact: true }).click()
+  await page
+    .getByRole('button', { name: '天空与碎金光路', exact: true })
+    .click()
+  const strength = page.getByRole('spinbutton', {
+    name: '天空与碎金光路 · 倒影强度',
+    exact: true,
+  })
+  await strength.fill('0')
+  await page.locator('.panel-toggle').click()
+  await page.waitForTimeout(200)
+  const without = await canvas.screenshot()
+  await page.locator('.panel-toggle').click()
+  await strength.fill('1')
+  await page.locator('.panel-toggle').click()
+  await page.waitForTimeout(200)
+  const withReflection = await canvas.screenshot()
+  expect(withReflection.equals(without)).toBe(false)
+  await page.locator('.panel-toggle').click()
+  await expect(canvas).toHaveAttribute('data-reflection-size', /^\d+x\d+$/)
+  for (const name of ['清晨', '正午', '黄昏', '夜晚']) {
+    await page.getByRole('button', { name, exact: true }).click()
+    await page.waitForTimeout(100)
+    await canvas.screenshot({ path: test.info().outputPath(`${name}.png`) })
+  }
   expect(errors).toEqual([])
 })

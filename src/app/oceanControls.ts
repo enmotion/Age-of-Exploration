@@ -185,7 +185,7 @@ export const oceanControlGroups: OceanControlGroup[] = [
   {
     id: 'lighting',
     title: '天空与碎金光路',
-    description: '太阳位置、天空亮度和水面反光',
+    description: '场景倒影、波浪反光与独立的日月光照',
     controls: [
       bounded('inclination', '太阳高度', -0.18, 1.25, 0.01),
       bounded('azimuth', '太阳方位', -3.14, 3.14, 0.02),
@@ -193,6 +193,8 @@ export const oceanControlGroups: OceanControlGroup[] = [
       bounded('envIntensity', '环境光', 0, 2, 0.05),
       bounded('lightIntensity', '太阳光', 0, 3, 0.05),
       color('highlightColor', '反光颜色'),
+      bounded('fresnelStrength', '倒影强度', 0, 2, 0.05),
+      bounded('roughness', '水面粗糙度', 0.02, 0.8, 0.01),
       bounded('highlightStrength', '反光强度', 0, 2, 0.05),
       bounded('highlightSharpness', '反光锐度', 2, 160, 1),
       bounded('glintScale', '碎金尺度', 0.02, 1, 0.01),
