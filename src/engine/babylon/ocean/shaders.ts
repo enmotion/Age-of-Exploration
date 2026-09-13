@@ -531,7 +531,12 @@ void main() {
   water=mix(water,foamLit,clamp(contactFoam*foamContact*shoreFoam,0.0,.92));
 
 
-  float transmission=pow(max(0.0,dot(viewDir,-normalize(sunDirection))),3.0)*max(0.0,vHeight*sssScale+sssBase)*sssStrength;
+  // 次表面透射只应发生在**逆光**时（相机朝太阳看，光从浪脊背后透过来）。
+  // 原来用的是 dot(viewDir, 指向太阳)：这个量在"太阳在相机这一侧、水面正面受光"时最大，
+  // 恰好是最不该有透射的情况——符号反了。结果是从某些朝向俯瞰时整片水面被涂成 sssColor
+  // （亮青），而且只在特定朝向出现。
+  float backlight = max(0.0, -dot(viewDir, -normalize(sunDirection)));
+  float transmission=pow(backlight,3.0)*max(0.0,vHeight*sssScale+sssBase)*sssStrength;
   water+=sssColor*transmission*(1.0-foam);
   float lum=dot(water,vec3(.2126,.7152,.0722));
   water=mix(vec3(lum),water,saturation)*brightness;
