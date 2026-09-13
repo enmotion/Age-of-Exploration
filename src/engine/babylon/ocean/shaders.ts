@@ -147,6 +147,7 @@ uniform mat4 worldViewProjection;
 uniform mat4 world;
 uniform float time;
 uniform float facetJitter;
+uniform float heightScale;
 varying vec3 vWorld;
 varying float vHeight;
 varying vec3 vCrests;
@@ -167,7 +168,8 @@ void main() {
   evaluateOcean(p.xz, displacement, slope, crests);
   p += displacement;
   vWorld = (world * vec4(p, 1.0)).xyz;
-  vHeight = displacement.y;
+  // 按默认设置的参考尺度归一化：拉浪高时只让波浪变大，配色/次表面/泡沫保持稳定。
+  vHeight = displacement.y * heightScale;
   vCrests = crests;
   vBase = base;
   vCellSize = cellSize;
@@ -219,6 +221,10 @@ uniform float edgeGlowStrength;
 uniform float edgeGlowWidth;
 uniform float vertexGlowStrength;
 uniform float glowSpread;
+uniform float shadowStrength;
+uniform vec3 shipShadow;
+uniform vec3 shipShadowSize;
+uniform float shipYaw;
 uniform float facetFadeStart;
 uniform float facetFadeEnd;
 uniform float shadingContrast;
@@ -227,6 +233,7 @@ uniform float toneSteps;
 uniform float toneTransition;
 uniform float heightColorStrength;
 uniform float heightColorBias;
+uniform float slopeScale;
 uniform float slopeColorStrength;
 uniform float slopeColorBias;
 uniform float lightColorStrength;
@@ -324,7 +331,8 @@ void main() {
   if (faceNormal.y < 0.0) faceNormal *= -1.0;
   // 纯平色：只用真实三角形的面法线，不做平滑法线混合，也不叠加法线扰动。
   vec3 normal = faceNormal;
-  float slope = 1.0 - max(normal.y, 0.0);
+  // 同 vHeight：坡度也按参考尺度归一化，否则拉浪高时坡色也会饱和。
+  float slope = (1.0 - max(normal.y, 0.0)) * slopeScale;
   // 面片 ID：把未变形的格点坐标量化成格号，逐面片得到稳定随机值。
   // 格号只取决于面片在地面网格里的位置，与浪高、时间无关，所以不会闪。
   // hash 必须与顶点着色器的 oceanHash、CPU 端 seaCellHash 保持同一公式。
@@ -485,7 +493,39 @@ void main() {
   }
   // 越靠近岸线越浅，向薄荷青绿过渡；参考图的近岸瓦片明显更亮更绿。
   float shallow=1.0-smoothstep(shallowStart,max(shallowStart+1.0,shallowEnd),max(0.0,shoreDistance));
+  // ---- 阴影（解析式）----
+  // 海面是自定义 ShaderMaterial，拿不到 Babylon 的阴影贴图：试过在片元里手动采样，
+  // 但深度编码对不上（实测 87% 的像素被判成阴影），不再靠猜。
+  // 改为对我们的简单几何直接求交：从水面沿太阳方向反推到物体高度，看落点是否在底面内。
+  // 岛 = 圆柱，船 = 长方体。确定、无编码依赖、开销只有几次距离判断。
+  float shadowFactor = 1.0;
+  vec3 toSun = normalize(-sunDirection);
+  if (shadowStrength > 0.001 && toSun.y > 0.02) {
+    vec2 sunStep = toSun.xz / toSun.y;
+    for (int i = 0; i < 8; i++) {
+      if (float(i) >= islandCount) break;
+      vec3 island = islands[i];
+      float radius = island.z;
+      if (radius <= 0.0) continue;
+      float height = max(1.0, radius * 1.15);      // 岛高与岸半径同量级
+      vec2 hit = vWorld.xz + sunStep * max(0.0, height - vWorld.y);
+      if (distance(hit, island.xy) < radius) shadowFactor = 0.0;
+    }
+    // 船：转到船的局部坐标系再测长方体
+    if (shipShadow.y > 0.0) {
+      float height = shipShadow.z;
+      vec2 hit = vWorld.xz + sunStep * max(0.0, height - vWorld.y);
+      vec2 rel = hit - shipShadow.xy;
+      float s = sin(shipYaw), c = cos(shipYaw);
+      vec2 local = vec2(rel.x * c + rel.y * s, -rel.x * s + rel.y * c);
+      if (abs(local.x) < shipShadowSize.x && abs(local.y) < shipShadowSize.y) shadowFactor = 0.0;
+    }
+  }
+
   water=mix(water,shallowColor,shallow*.85);
+  // 阴影作用在**水体本身**：在浅水混合之后、白沫与高光之前。
+  // 白沫是散射出来的亮部，不该被太阳阴影直接压掉。
+  water=mix(water,water*.42,1.0-shadowFactor);
   // 岸线一圈白沫；step 用来避免岛屿内部（负距离）也长出白沫。
   float shoreFoam=(1.0-smoothstep(0.0,3.4,max(0.0,shoreDistance)))*step(-2.5,shoreDistance);
   water=mix(water,foamLit,clamp(contactFoam*foamContact*shoreFoam,0.0,.92));

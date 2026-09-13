@@ -116,6 +116,8 @@ export interface OceanSettings {
    * 它是在泡沫信号上叠加的偏置，所以选面始终由浪花决定，不是随机抽面。
    */
   glowSpread: number
+  /** 海面接收阴影的强度。0 = 关闭。 */
+  shadowStrength: number
   facetFadeStart: number
   facetFadeEnd: number
   normalFadeStart: number
@@ -312,6 +314,7 @@ export const defaultOceanSettings: Readonly<OceanSettings> = {
   edgeGlowWidth: 0.05,
   vertexGlowStrength: 0.4,
   glowSpread: 0.35,
+  shadowStrength: 0.85,
   facetFadeStart: 140,
   facetFadeEnd: 700,
   normalFadeStart: 220,

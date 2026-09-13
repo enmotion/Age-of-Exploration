@@ -1,5 +1,11 @@
 import * as BABYLON from '@babylonjs/core'
-import { SEA_RING_SEGMENTS, seaRingLayout } from '../../../domain/ocean'
+// 副作用导入：注册 glTF/GLB 加载器（SceneLoader 本身在 core 里）
+import '@babylonjs/loaders/glTF'
+import {
+  SEA_RING_SEGMENTS,
+  defaultOceanSettings,
+  seaRingLayout,
+} from '../../../domain/ocean'
 import type { OceanSettings } from '../../../domain/ocean'
 import {
   oceanFragment,
@@ -56,6 +62,16 @@ const SEA_REBUILD_INTERVAL_MS = 110
  * 所以只要几十厘米就够。裙边太深反而会自己露出来变成一条暗线（竖直面法线朝侧向，受光不同）。
  */
 const SEA_SKIRT_DEPTH = 4
+
+/** 船模型（自包含 GLB：12 张贴图全部内嵌）。 */
+const SHIP_MODEL_URL = '/assets/ships/caravel-pbr.glb'
+/**
+ * 船模型的吃水。模型原点在**龙骨最低点**（包围盒 min Y = 0），
+ * 所以要让龙骨沉到水面以下，root 的 y 必须是负偏移——不能像原来那样用正值。
+ */
+const SHIP_DRAFT = 1.2
+/** 让模型长度（13.1）接近原程序化船的观感尺寸（约 15）。 */
+const SHIP_MODEL_SCALE = 1.15
 
 /** 环 i 的面片边长。 */
 function seaRingCellSize(baseCell: number, ring: number) {
@@ -194,12 +210,57 @@ function createSeaRings(
   return rings
 }
 
+/**
+ * Gerstner 波场的折叠判据：总陡度 Σ(k·a) 必须 < 1，否则波面自交（卷曲穿插）。
+ *
+ * 三档浪高是**相加**的，滑杆又各自允许到 2，所以很容易越过这个界限。
+ * 实测把三档都拉到 2 时 Σ(k·a) = 2.0——波面已经折叠，浪脊信号铺满全画面，
+ * 配色与泡沫一起饱和，看起来就是"亮青水面 + 大片斑块"。
+ * 这里按比例整体缩放，**保持三档之间的配比**，只把总陡度压回安全范围。
+ * 默认设置是 0.697，低于上限，所以默认观感完全不受影响。
+ */
+const MAX_WAVE_STEEPNESS = 0.85
+
+/**
+ * 浪高与坡度的"参考尺度"。
+ *
+ * 颜色映射、次表面散射、泡沫细修都直接吃 vHeight / slope。如果按**原始值**用，
+ * 把三档浪高一起拉大时这些量会一起饱和——实测整片水面会被涂成 crestColor（青色），
+ * 泡沫也大面积爆开。而浪脊/泡沫的**主**信号早就按 waveRms 归一化过了，
+ * 只有这几处没有，同一物理量两套算法。
+ *
+ * 这里算出当前的参考尺度，再用默认设置下的值去除，得到归一化系数：
+ * **默认设置下系数恰好为 1**，所以默认观感完全不变，只修正非默认组合。
+ */
+function waveScaleReferences(settings: OceanSettings) {
+  const amplitude = waveAmplitudes(settings)
+  const k = (length: number) => (2 * Math.PI) / Math.max(0.2, length)
+  const kx = k(settings.largeLength)
+  const ky = k(settings.mediumLength)
+  const kz = k(settings.smallLength)
+  return {
+    height: Math.hypot(amplitude.x, amplitude.y, amplitude.z),
+    slope: Math.hypot(amplitude.x * kx, amplitude.y * ky, amplitude.z * kz),
+  }
+}
+
+/** 默认设置下的参考尺度，用作归一化基准。 */
+const DEFAULT_WAVE_SCALE = waveScaleReferences(defaultOceanSettings)
+
 function waveAmplitudes(settings: OceanSettings) {
-  return new BABYLON.Vector3(
+  const amplitude = new BABYLON.Vector3(
     Math.max(0.01, settings.largeVertical * settings.swellScale * 1.65),
     Math.max(0.01, settings.mediumVertical * settings.localScale * 1.15),
     Math.max(0.005, settings.smallVertical * settings.localScale * 0.5),
   )
+  const steepness =
+    (amplitude.x * 2 * Math.PI) / Math.max(0.2, settings.largeLength) +
+    (amplitude.y * 2 * Math.PI) / Math.max(0.2, settings.mediumLength) +
+    (amplitude.z * 2 * Math.PI) / Math.max(0.2, settings.smallLength)
+  if (steepness > MAX_WAVE_STEEPNESS) {
+    amplitude.scaleInPlace(MAX_WAVE_STEEPNESS / steepness)
+  }
+  return amplitude
 }
 
 type WaveComponent = {
@@ -776,11 +837,17 @@ export async function createOcean(
       'sssColor',
       'fogColor',
       'cellSize',
+      'heightScale',
+      'slopeScale',
       'facetStrength',
       'edgeGlowStrength',
       'edgeGlowWidth',
       'vertexGlowStrength',
       'glowSpread',
+      'shadowStrength',
+      'shipShadow',
+      'shipShadowSize',
+      'shipYaw',
       'facetFadeStart',
       'facetFadeEnd',
       'facetJitter',
@@ -862,15 +929,68 @@ export async function createOcean(
     sea.forEach((mesh) => (mesh.material = ocean))
 
     const ship = createShip(scene)
-    createCloud(scene, -38, 47, 145, 1.18)
-    createCloud(scene, 34, 57, 188, 1.45)
-    createCloud(scene, 2, 35, 118, 0.72)
-    createCloud(scene, 88, 43, 210, 0.9)
+    // 船模型异步加载；加载完成前先用程序化船顶上，避免空窗。
+    // 关键：GLB 直接挂到**同一个 root** 上，于是海面浮沉、纵横摇那套代码完全不用改。
+    void BABYLON.SceneLoader.ImportMeshAsync('', '', SHIP_MODEL_URL, scene)
+      .then((result) => {
+        if (disposed) {
+          result.meshes.forEach((mesh) => mesh.dispose())
+          return
+        }
+        ship.getChildMeshes().forEach((mesh) => mesh.dispose())
+        result.meshes.forEach((mesh) => {
+          if (!mesh.parent) mesh.parent = ship
+          mesh.receiveShadows = true
+          shadowGenerator.addShadowCaster(mesh, false)
+        })
+        ship.scaling.setAll(SHIP_MODEL_SCALE)
+        // 船体贴图本身很暗（oak-basecolor 平均 rgb(68,61,55)，线性空间约 0.05），
+        // 在场景的 ACES 色调映射下几乎发黑。参考图的船体是中等暖棕，所以做一次提亮 + 轻微暖化。
+        // 注意：色调映射会压缩，所以系数要压得比较大才看得出差别（实测 1.0→2.4 只提升约 20%）。
+        result.meshes.forEach((mesh) => {
+          const material = mesh.material
+          if (material instanceof BABYLON.PBRMaterial) {
+            material.albedoColor = new BABYLON.Color3(2.4, 2.26, 2.06)
+          }
+        })
+        canvas.dataset.ship = 'caravel-pbr'
+      })
+      .catch(() => {
+        // 加载失败就保留程序化船，不影响渲染
+      })
+    const cloudRoots = [
+      createCloud(scene, -38, 47, 145, 1.18),
+      createCloud(scene, 34, 57, 188, 1.45),
+      createCloud(scene, 2, 35, 118, 0.72),
+      createCloud(scene, 88, 43, 210, 0.9),
+    ]
     const cloudMaterials = scene.materials.filter((entry) =>
       entry.name.startsWith('cloud-'),
     ) as BABYLON.StandardMaterial[]
-    ISLANDS.forEach((island) =>
+    const islandRoots = ISLANDS.map((island) =>
       createIsland(scene, island.x, island.z, island.scale),
+    )
+
+    // ---- 阴影视图 ----
+    // 太阳是平行光，用正交阴影贴图。near/far 固定下来是**有意的**：
+    // 海面是自定义 ShaderMaterial、不会自动接收阴影，需要在片元里手算
+    // Babylon 那套"归一化线性深度"，而那个公式要用到这两个值。
+    // 这两个值只服务于 Babylon 自己的物体阴影（船体自遮挡、岛屿之间）。
+    // 海面的阴影走的是解析式，不用阴影贴图。
+    sun.shadowMinZ = 1
+    sun.shadowMaxZ = 260
+    const shadowGenerator = new BABYLON.ShadowGenerator(2048, sun)
+    shadowGenerator.bias = 0.002
+    shadowGenerator.normalBias = 0.03
+    const shadowCasters: BABYLON.AbstractMesh[] = []
+    ;[...islandRoots, ...cloudRoots].forEach((root) => {
+      root.getChildMeshes().forEach((mesh) => {
+        mesh.receiveShadows = true
+        shadowCasters.push(mesh)
+      })
+    })
+    shadowCasters.forEach((mesh) =>
+      shadowGenerator.addShadowCaster(mesh, false),
     )
     const wake = createWake(scene)
     // One half-resolution scene capture, excluding water to prevent recursion.
@@ -881,14 +1001,16 @@ export async function createOcean(
       false,
     )
     reflection.clearColor = new BABYLON.Color4(0, 0, 0, 0)
-    reflection.renderList = scene.meshes.filter(
-      (mesh) =>
-        !sea.includes(mesh as BABYLON.Mesh) &&
-        mesh !== wake.mesh &&
-        mesh !== skyMesh &&
-        mesh !== sunDisc &&
-        mesh !== moonDisc,
-    )
+    // 用谓词而不是静态快照：海面环网格会重建、船模型是异步加载的，
+    // 一次性 filter 出来的数组会把后来的新网格全部漏掉（表现是"有物体、没倒影"）。
+    const excludedFromReflection = new Set<BABYLON.AbstractMesh>([
+      wake.mesh,
+      skyMesh,
+      sunDisc,
+      moonDisc,
+    ])
+    reflection.renderListPredicate = (mesh) =>
+      !excludedFromReflection.has(mesh) && !sea.includes(mesh as BABYLON.Mesh)
     const reflectionMatrix = BABYLON.Matrix.Identity()
     reflection.onBeforeRenderObservable.add(() => {
       reflectionMatrix.copyFrom(scene.getTransformMatrix())
@@ -904,6 +1026,8 @@ export async function createOcean(
     let waveComponents = buildWaveComponents(initial)
     let settings = { ...initial }
     let previous = { ...initial }
+    // 船的偏航角，解析阴影要用（与每帧的船体姿态保持一致）
+    let shipYaw = 0
     let clock = initial.timeOffset
     let last = performance.now()
     let lastDiagnostics = 0
@@ -1049,11 +1173,36 @@ export async function createOcean(
       ocean.setColor3('highlightColor', linearColor(next.highlightColor))
       ocean.setColor3('sssColor', linearColor(next.sssColor))
       ocean.setColor3('fogColor', linearColor(next.fogColor))
+      const waveScale = waveScaleReferences(next)
+      ocean.setFloat(
+        'heightScale',
+        DEFAULT_WAVE_SCALE.height / Math.max(0.001, waveScale.height),
+      )
+      ocean.setFloat(
+        'slopeScale',
+        DEFAULT_WAVE_SCALE.slope / Math.max(0.001, waveScale.slope),
+      )
       ocean.setFloat('facetStrength', next.facetStrength)
       ocean.setFloat('edgeGlowStrength', next.edgeGlowStrength)
       ocean.setFloat('edgeGlowWidth', next.edgeGlowWidth)
       ocean.setFloat('vertexGlowStrength', next.vertexGlowStrength)
       ocean.setFloat('glowSpread', next.glowSpread)
+      ocean.setFloat('shadowStrength', next.shadowStrength)
+      // 解析阴影用的船体包围盒（模型局部：长 13.1、宽 4.8、高约 10）× 缩放。
+      // y 用船体的中段高度而不是水线，否则投影会偏。
+      ocean.setVector3(
+        'shipShadow',
+        new BABYLON.Vector3(
+          ship.position.x,
+          ship.position.z,
+          ship.position.y + 5.5 * SHIP_MODEL_SCALE,
+        ),
+      )
+      ocean.setVector3(
+        'shipShadowSize',
+        new BABYLON.Vector3(6.6 * SHIP_MODEL_SCALE, 2.4 * SHIP_MODEL_SCALE, 0),
+      )
+      ocean.setFloat('shipYaw', shipYaw)
       ocean.setFloat('facetFadeStart', next.facetFadeStart)
       ocean.setFloat('facetFadeEnd', next.facetFadeEnd)
       ocean.setFloat('facetJitter', next.facetJitter)
@@ -1228,11 +1377,12 @@ export async function createOcean(
       const shipHeight = sampleWave(waveComponents, 0, 10, clock)
       ship.position.y =
         settings.seaLevel +
-        settings.buoyOffset +
-        0.8 +
+        settings.buoyOffset -
+        SHIP_DRAFT * SHIP_MODEL_SCALE +
         (settings.buoyancy ? shipHeight * settings.heaveScale * 0.34 : 0)
+      shipYaw = Math.sin(clock * 0.22) * 0.018
       ship.rotationQuaternion = BABYLON.Quaternion.RotationYawPitchRoll(
-        Math.sin(clock * 0.22) * 0.018,
+        shipYaw,
         settings.buoyancy
           ? Math.sin(clock * 0.42) * 0.026 * settings.pitchScale
           : 0,

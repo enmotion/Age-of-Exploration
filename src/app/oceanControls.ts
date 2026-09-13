@@ -99,6 +99,7 @@ export const oceanControlGroups: OceanControlGroup[] = [
       bounded('edgeGlowWidth', '棱边宽度', 0.005, 0.3, 0.005),
       bounded('vertexGlowStrength', '顶点高光', 0, 1, 0.02),
       bounded('glowSpread', '浪花扩散', 0, 1, 0.02),
+      bounded('shadowStrength', '海面阴影强度', 0, 1, 0.02),
       bounded('facetFadeStart', '面片淡出起点 m', 0, 2000, 10),
       bounded('facetFadeEnd', '面片淡出终点 m', 10, 4000, 10),
       bounded('facetJitter', '面片抖动', 0, 0.5, 0.01),

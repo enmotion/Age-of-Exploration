@@ -1344,3 +1344,200 @@ float glowMask = clamp(faceFoamSignal + glowSpread, 0.0, 1.0)
 参考图本身**没有**这个效果——它是我们主动加的风格化点缀。
 `浪花扩散` 越大光圈越宽；两个强度控件都设 0 即完全回到原样。
 两个强度控件都设 0 即可完全回到原样。
+
+---
+
+## 追加 · 换上 caravel-pbr 船模型
+
+### 资产
+
+`assets/source/ships/caravel copy/caravel-pbr.glb` → 复制到 `public/assets/ships/caravel-pbr.glb`。
+
+GLB 是**自包含**的：12 张贴图全部内嵌在 bufferView 里，所以只需要复制这一个文件
+（`material-atlas.png` 和 `textures/` 是源工程的中间产物，运行时不需要）。
+6 个材质：hull / deck / spars / canvas / rope / iron。
+
+模型数据：**尺寸 4.8 × 9.96 × 13.1**，原点在**龙骨最低点**（包围盒 min Y = 0）。
+
+### 集成方式：挂到同一个 root 上
+
+```ts
+const ship = createShip(scene) // 程序化船先顶上，避免空窗
+BABYLON.SceneLoader.ImportMeshAsync('', '', SHIP_MODEL_URL, scene).then(
+  (result) => {
+    ship.getChildMeshes().forEach((mesh) => mesh.dispose())
+    result.meshes.forEach((mesh) => {
+      if (!mesh.parent) mesh.parent = ship
+    })
+    ship.scaling.setAll(SHIP_MODEL_SCALE)
+  },
+)
+```
+
+GLB 挂到**同一个 TransformNode** 上，于是海面浮沉、纵横摇那套每帧代码**一行都不用改**。
+
+因为原点在龙骨，吃水必须用**负偏移**（原程序化船用的是 `+0.8`）：
+`ship.position.y = seaLevel + buoyOffset - SHIP_DRAFT*scale + heave`。
+
+### 顺带修掉的一个隐患
+
+反射原来用静态快照：
+
+```ts
+reflection.renderList = scene.meshes.filter(...)     // 创建时的一次性数组
+```
+
+海面环网格会重建、船模型是异步加载的——**两者都会被这个快照漏掉**，
+表现是"有物体、没倒影"。已改成 `renderListPredicate`（每帧求值），
+以后任何动态生成的网格都会自动进入倒影。
+
+### 踩到的三件事
+
+**1. 船体发黑，一开始以为是光照。** 加了反射探针做 IBL，但强度从 1.0 调到 6.0
+船体亮度只从 72.7 到 75.5——几乎没贡献。查下来：
+
+- 探针抓不到天空，因为 `skyMesh.infiniteDistance = true`（天空球跟着**主相机**走）
+- 而更根本的是：**船体贴图本身就暗**——`oak-basecolor` 平均 rgb(68,61,55)，
+  线性空间约 0.05；`oak-orm` 显示金属度 0、粗糙度 0.87，所以 IBL 对它本来就没多大作用
+
+结论：不是光照 bug。已去掉没用的探针，改为给 PBR 材质做一次提亮 + 轻微暖化
+（`albedoColor = (2.4, 2.26, 2.06)`）。系数要压得大才有效，因为 **ACES 色调映射会压缩**：
+实测 1.0→2.4 只让船体亮度从 50 到 61。
+
+**2. 浏览器测试超时。** 换船后 `data-render-fps=3.3`、用例 90 秒超时。但**实测稳态帧率是 60**——
+船本身没问题。真因是那个用例要拍 **6 张 1280×720 的 canvas 截图**，本来就要 84 秒，
+已经贴着 90 秒的线；船的加载（2.18 MB + 12 张贴图解码）把它推了过去。已把时限放宽到 150 秒。
+
+**3. 一个教训**：`data-render-fps` 是**均值**，加载期的解码会把它拖到 3.3，
+看上去像性能崩了。**判断性能要看稳态，不能只看一个可能包含加载期的统计量。**
+
+成图见 `images/ship-hero.png`，换船前后对照见 `images/ship-replacement.png`。
+
+---
+
+## 追加 · 阴影
+
+### 结论先说
+
+- **物体之间的阴影**：用 Babylon 的 `ShadowGenerator`（平行光 + 正交阴影贴图），
+  船体自遮挡、岛屿之间互相投影，走 Babylon 自己的管线。
+- **海面接收阴影**：**改成解析式**。阴影贴图这条路试过、走不通（见下），
+  而海面是自定义 `ShaderMaterial`，本来也不会自动接收阴影。
+
+### 海面的解析阴影
+
+不做任何采样，直接对我们自己的简单几何求交：从水面沿太阳方向反推到物体高度，
+看落点是否落在底面内。岛 = 圆柱，船 = 长方体。
+
+```glsl
+vec3 toSun = normalize(-sunDirection);
+vec2 sunStep = toSun.xz / toSun.y;
+vec2 hit = vWorld.xz + sunStep * max(0.0, height - vWorld.y);
+if (distance(hit, island.xy) < island.z) shadowFactor = 0.0;   // 岛
+// 船：转到船的局部坐标系再测长方体
+```
+
+确定、无编码依赖、开销只有几次距离判断（8 个岛 + 1 条船）。
+
+### 阴影贴图这条路为什么放弃
+
+先在片元里手动采样 Babylon 的阴影贴图。按 `shadowMapVertexMetric` 的公式复刻：
+
+```glsl
+vDepthMetricSM = (gl_Position.z + depthValuesSM.x) / depthValuesSM.y + biasAndScaleSM.x
+```
+
+但实测对不上：
+
+| 检查                    | 结果                              |
+| ----------------------- | --------------------------------- |
+| 判为阴影的像素占比      | **87%**（正常应该只有几个百分点） |
+| `myDepth < 0.01` 的比例 | 12.2%（按公式应该接近 100%）      |
+| `stored < 0.01` 的比例  | 37.4%                             |
+
+中途修掉一个**真 bug**（阴影贴图默认清成 0，没被投射者覆盖的像素会被判成"比任何东西都近"），
+但修完比例从 85.8% 只变到 87%——说明问题不在清屏色，而在深度换算本身。
+
+**教训**：这条路我连续猜了三次（清屏色、矩阵、编码公式），每次都有"看起来合理"的解释。
+**当连续几次修正都不改变结果时，应该换一条不依赖黑盒内部实现的路，
+而不是继续从源码里推断。** 解析式一次就成了。
+
+### 一个反复踩的坑：调试图被色调映射改写
+
+我用 `gl_FragColor = vec4(myDepth, storedDepth, 0, 1)` 输出深度值，
+读到的 0.21 / 0.56 根本不是原值——**场景开着 ACES 色调映射，读数是显示值不是线性值**。
+
+可靠的调试方式是输出**二值**（`step()` 之后的结果），0/1 能穿过色调映射。
+这次也是靠二值化才测出 87% 这个关键数字。
+
+### 控件
+
+新增「海面阴影强度」（0 = 关闭，默认 0.85），控件数 89 → 90。
+
+对照见 `images/water-shadow.png`。
+
+---
+
+## 追加 · "高角度下水面变成亮青色 + 大片斑块"
+
+### 现象与排查
+
+俯瞰角度下水面呈亮青色、散布大片斑块。先用**换色探针**定位是哪个项：
+
+| 改动                | 结果                 |
+| ------------------- | -------------------- |
+| `crestColor` → 纯红 | **大片水面跟着变红** |
+| `sssColor` → 纯红   | 几乎无变化           |
+
+所以青色来自 `crestColor`，不是次表面散射：
+
+```glsl
+float heightMask = clamp(vHeight*heightColorStrength+heightColorBias, 0, 1);
+water = mix(water, crestColor, smoothstep(.58,.98,heightMask)*.82);   // 几乎全中
+```
+
+### 第一层修正：heightMask / slopeMask 的归一化
+
+浪脊/泡沫的**主**信号早就按 `waveRms` 归一化过，但颜色映射、次表面、泡沫细修吃的都是
+**原始 `vHeight`**——同一个"浪有多高"两套算法。已在源头统一：
+
+```glsl
+vHeight = displacement.y * heightScale;          // 顶点
+float slope = (1.0 - max(normal.y,0.0)) * slopeScale;   // 片元
+```
+
+`heightScale` / `slopeScale` 用**默认设置下的参考尺度**做基准，所以默认值恰好是 1——
+**默认观感完全不变**，只让配色与浪高解耦。
+
+### 但它几乎没改变画面，因为真因在更上游
+
+| 设置             | Σ(k·a)    |          |
+| ---------------- | --------- | -------- |
+| 默认             | **0.697** | 正常     |
+| 三档浪高都拉到 2 | **2.005** | **折叠** |
+
+Gerstner 波场的折叠判据是 **Σ(k·a) < 1**，否则波面自交（卷曲穿插）。
+三档浪高是**相加**的，滑杆又各自允许到 2，非常容易越界。
+
+折叠之后浪脊信号铺满整个画面，于是浪尖色、泡沫、次表面、高光**一起饱和**——
+看上去就是"亮青水面 + 大片斑块"。**这不是着色问题，是波场退化了。**
+
+### 最终修正：夹住总陡度
+
+```ts
+const MAX_WAVE_STEEPNESS = 0.85
+// 保持三档之间的配比，只把总陡度按比例压回安全范围
+if (steepness > MAX_WAVE_STEEPNESS)
+  amplitude.scaleInPlace(MAX_WAVE_STEEPNESS / steepness)
+```
+
+默认设置是 0.697，低于上限，所以默认观感不受影响；只有越界的组合被拉回来。
+
+效果：三档浪高全 2 时，水面从"亮青 + 大片斑块"回到**深蓝 + 正常波纹**。
+对照见 `images/wave-steepness-clamp.png`。
+
+### 教训
+
+**"某个滑杆拉满就坏掉"这类问题，先算一算这个参数有没有物理上的有效范围。**
+这次真正的判据（Σ(k·a) < 1）是一个标准结论，算一次就能定位；
+而我先花了一轮在着色器里找哪个颜色项爆掉——那只治了标。
