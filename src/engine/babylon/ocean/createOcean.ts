@@ -1,4 +1,5 @@
 import * as BABYLON from '@babylonjs/core'
+import { SEA_RING_SEGMENTS, seaRingLayout } from '../../../domain/ocean'
 import type { OceanSettings } from '../../../domain/ocean'
 import {
   oceanFragment,
@@ -37,67 +38,129 @@ function standardMaterial(
 }
 
 /**
- * 海面平面固定为 SEA_EXTENT × SEA_EXTENT 米，细分段数决定面片数量：
- * 面片数 = 段数²，顶点数 = (段数 + 1)²，单个面片边长 = SEA_EXTENT ÷ 段数。
+ * 海面用"同心环 LOD"覆盖：每环每边 SEA_RING_SEGMENTS 格，格子逐环翻倍。
+ * 环 i 的半宽 R_i = (SEA_RING_SEGMENTS / 2) × cell_i，于是 R_{i+1} = 2 × R_i，
+ * 环边界处顶点天然嵌套（粗环的边界点是细环的子集），只在顶点之间可能留细缝，用裙边挡住。
+ *
+ * 关键：所有环都以**世界原点为中心且静止**，因此顶点着色器里的局部坐标恒等于世界坐标，
+ * 波场、面片 ID、岛屿距离场都不需要额外换算。
  */
-const SEA_EXTENT = 700
-const SEA_SEGMENTS_MIN = 24
-const SEA_SEGMENTS_MAX = 512
 /**
- * 拖动细分滑杆时 input 事件远密于帧率，必须节流，否则一次拖动会重建上百次网格。
- * 实测单次重建在主线程上的最长掉帧（1440×880）：
- *   48 段 ≈ 0ms、190 段 ≈ 0ms、256 段 ≈ 6ms、384 段 ≈ 13ms、512 段 ≈ 22ms。
- * 低细分可以按帧率级别重建以保持跟手，高细分放慢节流间隔。
+ * 重建节流间隔。环组顶点数只有约 4 万（旧的单张均匀网格是 26 万），
+ * 重建很便宜，固定小间隔即可，不需要按规模分档。
  */
-const SEA_REBUILD_INTERVAL_LOW = 90
-const SEA_REBUILD_INTERVAL_HIGH = 220
-const SEA_REBUILD_HEAVY_SEGMENTS = 256
+const SEA_REBUILD_INTERVAL_MS = 110
+/**
+ * 裙边深度（米）：挡住相邻环之间因细分不同而产生的细缝。
+ * 细缝就是"细环边缘中点相对粗环直线边缘"的弓形高——按 3 m 面片、34 m 波长估约 7 cm，
+ * 所以只要几十厘米就够。裙边太深反而会自己露出来变成一条暗线（竖直面法线朝侧向，受光不同）。
+ */
+const SEA_SKIRT_DEPTH = 4
 
-function createSeaMesh(scene: BABYLON.Scene, segments: number) {
-  const cellSize = SEA_EXTENT / segments
+/** 环 i 的面片边长。 */
+function seaRingCellSize(baseCell: number, ring: number) {
+  return baseCell * 2 ** ring
+}
+
+/** 环 i 的覆盖半宽。每环每边 SEA_RING_SEGMENTS 格，所以半宽 = 格数/2 × 该环面片边长。 */
+function seaRingHalfExtent(baseCell: number, ring: number) {
+  return (SEA_RING_SEGMENTS / 2) * seaRingCellSize(baseCell, ring)
+}
+
+/** 所有环合起来的最外圈半宽。 */
+function seaOuterHalfExtent(baseCell: number, ringCount: number) {
+  return seaRingHalfExtent(baseCell, Math.max(0, ringCount - 1))
+}
+
+/**
+ * 生成第 ring 环：一个挖空的方环（最内环不挖），外边界带一圈向下的裙边。
+ * position.y 用来承载裙边的下沉量，顶点着色器会在此基础上叠加波场位移。
+ */
+function createSeaRing(
+  scene: BABYLON.Scene,
+  name: string,
+  cellSize: number,
+  ring: number,
+  isOutermost: boolean,
+) {
+  const segments = SEA_RING_SEGMENTS
   const side = segments + 1
-  const positions = new Float32Array(side * side * 3)
-  const half = SEA_EXTENT / 2
+  const half = (segments / 2) * cellSize
+  // 内侧挖空半宽：环 i 的内边界就是环 i-1 的外边界
+  // 内侧少挖一格：环 i+1 于是向内多覆盖一格，与环 i 的外边界**重叠**。
+  // 重叠比裙边干净——没有缝就不需要补，也不会有裙边竖直面被高光打亮成一条亮线。
+  const holeHalf = ring === 0 ? 0 : half / 2 - cellSize
+
+  const positions: number[] = []
   for (let row = 0; row < side; row += 1) {
     for (let col = 0; col < side; col += 1) {
-      const index = (row * side + col) * 3
-      positions[index] = col * cellSize - half
-      positions[index + 1] = 0
-      positions[index + 2] = row * cellSize - half
+      positions.push(col * cellSize - half, 0, row * cellSize - half)
     }
   }
-  // 每个格子的对角线方向按格号随机翻转，破坏规则格纹带来的对称感。
-  const indices = new Uint32Array(segments * segments * 6)
-  let cursor = 0
+
+  const indices: number[] = []
   for (let row = 0; row < segments; row += 1) {
     for (let col = 0; col < segments; col += 1) {
+      if (holeHalf > 0) {
+        const x0 = col * cellSize - half
+        const z0 = row * cellSize - half
+        const x1 = x0 + cellSize
+        const z1 = z0 + cellSize
+        const inside =
+          x0 >= -holeHalf && x1 <= holeHalf && z0 >= -holeHalf && z1 <= holeHalf
+        if (inside) continue
+      }
       const a = col + row * side
       const b = col + 1 + row * side
       const c = col + 1 + (row + 1) * side
       const d = col + (row + 1) * side
-      if (seaCellHash(col, row) > 0.5) {
-        indices[cursor] = a
-        indices[cursor + 1] = b
-        indices[cursor + 2] = d
-        indices[cursor + 3] = b
-        indices[cursor + 4] = c
-        indices[cursor + 5] = d
+      // 每个格子的对角线方向按格号随机翻转，破坏规则格纹带来的对称感。
+      if (seaCellHash(col + ring * 977, row + ring * 613) > 0.5) {
+        indices.push(a, b, d, b, c, d)
       } else {
-        indices[cursor] = a
-        indices[cursor + 1] = b
-        indices[cursor + 2] = c
-        indices[cursor + 3] = a
-        indices[cursor + 4] = c
-        indices[cursor + 5] = d
+        indices.push(a, b, c, a, c, d)
       }
-      cursor += 6
     }
   }
-  const mesh = new BABYLON.Mesh('faceted-sea', scene)
+
+  // 最外圈兜底：把边界顶点向下复制一份连成竖直面，挡住平面边缘（雾通常已经盖住）。
+  // 环与环之间不用裙边——那用的是"重叠一格"的方案。
+  if (isOutermost) {
+    const pushSkirt = (vertexIndex: number) => {
+      const i = vertexIndex * 3
+      positions.push(positions[i]!, -SEA_SKIRT_DEPTH, positions[i + 2]!)
+      return positions.length / 3 - 1
+    }
+    const edges: number[][] = [
+      Array.from({ length: side }, (_, i) => i),
+      Array.from({ length: side }, (_, i) => segments * side + i),
+      Array.from({ length: side }, (_, i) => i * side),
+      Array.from({ length: side }, (_, i) => i * side + segments),
+    ]
+    for (const edge of edges) {
+      for (let i = 0; i + 1 < edge.length; i += 1) {
+        const a = edge[i]!
+        const b = edge[i + 1]!
+        const a2 = pushSkirt(a)
+        const b2 = pushSkirt(b)
+        indices.push(a, a2, b2, a, b2, b)
+      }
+    }
+  }
+
+  const mesh = new BABYLON.Mesh(name, scene)
   const vertexData = new BABYLON.VertexData()
-  vertexData.positions = positions
-  vertexData.indices = indices
+  vertexData.positions = new Float32Array(positions)
+  vertexData.indices = new Uint32Array(indices)
   vertexData.applyToMesh(mesh, false)
+  // 每环一个格子尺寸，用顶点属性传给着色器，避免为每环复制一份材质。
+  // 自定义属性名 Babylon 推断不出 stride，必须显式给 1
+  mesh.setVerticesData(
+    'ringCellSize',
+    new Float32Array(positions.length / 3).fill(cellSize),
+    false,
+    1,
+  )
   return mesh
 }
 
@@ -107,12 +170,25 @@ function seaCellHash(x: number, y: number) {
   return value - Math.floor(value)
 }
 
-function clampSeaSegments(value: number) {
-  if (!Number.isFinite(value)) return SEA_SEGMENTS_MIN
-  return Math.min(
-    SEA_SEGMENTS_MAX,
-    Math.max(SEA_SEGMENTS_MIN, Math.round(value)),
-  )
+/** 生成整组同心环。返回顺序为由内到外。 */
+function createSeaRings(
+  scene: BABYLON.Scene,
+  baseCell: number,
+  ringCount: number,
+) {
+  const rings: BABYLON.Mesh[] = []
+  for (let ring = 0; ring < ringCount; ring += 1) {
+    rings.push(
+      createSeaRing(
+        scene,
+        `faceted-sea-${ring}`,
+        seaRingCellSize(baseCell, ring),
+        ring,
+        ring === ringCount - 1,
+      ),
+    )
+  }
+  return rings
 }
 
 function waveAmplitudes(settings: OceanSettings) {
@@ -693,6 +769,8 @@ export async function createOcean(
       'fogColor',
       'cellSize',
       'facetStrength',
+      'facetFadeStart',
+      'facetFadeEnd',
       'facetJitter',
       'shadingContrast',
       'shadingBias',
@@ -755,12 +833,17 @@ export async function createOcean(
       'low-poly-ocean',
       scene,
       { vertexSource: oceanVertex, fragmentSource: oceanFragment },
-      { attributes: ['position'], uniforms: oceanUniforms },
+      { attributes: ['position', 'ringCellSize'], uniforms: oceanUniforms },
     )
     ocean.backFaceCulling = false
-    let sea = createSeaMesh(scene, clampSeaSegments(initial.facetResolution))
-    sea.material = ocean
-    let seaSegments = clampSeaSegments(initial.facetResolution)
+    const initialLayout = seaRingLayout(
+      initial.seaExtent,
+      initial.facetCellSize,
+    )
+    let seaBaseCell = initialLayout.baseCell
+    let seaRingCount = initialLayout.ringCount
+    let sea = createSeaRings(scene, seaBaseCell, seaRingCount)
+    sea.forEach((mesh) => (mesh.material = ocean))
 
     const ship = createShip(scene)
     createCloud(scene, -38, 47, 145, 1.18)
@@ -774,7 +857,8 @@ export async function createOcean(
       createIsland(scene, island.x, island.z, island.scale),
     )
     const wake = createWake(scene)
-    wake.shader.setFloat('gridOffset', SEA_EXTENT / 2)
+    // 尾迹泡沫用最内环的格子，格点原点就是世界原点（各环半宽都是格子的整数倍）。
+    wake.shader.setFloat('gridOffset', 0)
 
     let waveComponents = buildWaveComponents(initial)
     let settings = { ...initial }
@@ -785,27 +869,30 @@ export async function createOcean(
     let pendingSeaRebuild: ReturnType<typeof setTimeout> | undefined
     let lastSeaRebuildAt = 0
 
-    /** 用新的细分段数重建海面网格；先建后删，重建失败时保留旧网格。 */
-    const rebuildSea = (segments: number) => {
-      // cellSize 与网格必须同步更新，否则面片 ID 会和真实面片错位。
-      // 尾迹泡沫也用同一套面片格，所以两边都要设。
-      ocean.setFloat('cellSize', SEA_EXTENT / segments)
-      wake.shader.setFloat('cellSize', SEA_EXTENT / segments)
-      if (segments === seaSegments) return
-      const previousMesh = sea
-      sea = createSeaMesh(scene, segments)
-      sea.material = ocean
-      sea.position.y = previousMesh.position.y
-      seaSegments = segments
-      previousMesh.dispose()
+    /** 重建整组同心环。先建后删，重建失败时保留旧网格。 */
+    const rebuildSea = (baseCell: number, ringCount: number) => {
+      // 尾迹泡沫跟随最内环：两者格子必须一致，否则泡沫与海面面片错位。
+      wake.shader.setFloat('cellSize', baseCell)
+      if (baseCell === seaBaseCell && ringCount === seaRingCount) return
+      const previousMeshes = sea
+      const nextMeshes = createSeaRings(scene, baseCell, ringCount)
+      const previousY = previousMeshes[0]?.position.y ?? 0
+      nextMeshes.forEach((mesh) => {
+        mesh.material = ocean
+        mesh.position.y = previousY
+      })
+      sea = nextMeshes
+      seaBaseCell = baseCell
+      seaRingCount = ringCount
+      ocean.setFloat('seaHalfExtent', seaOuterHalfExtent(baseCell, ringCount))
+      previousMeshes.forEach((mesh) => mesh.dispose())
     }
 
     /** 节流重建：窗口内连续改动合并为一次尾部重建，最终值一定会被应用。 */
-    const scheduleSeaRebuild = (segments: number) => {
-      const interval =
-        segments > SEA_REBUILD_HEAVY_SEGMENTS
-          ? SEA_REBUILD_INTERVAL_HIGH
-          : SEA_REBUILD_INTERVAL_LOW
+    const scheduleSeaRebuild = (baseCell: number, ringCount: number) => {
+      // 环组顶点数只有约 4 万（旧的单张均匀网格是 26 万），重建很便宜，
+      // 固定用小间隔节流即可，不需要按规模分档。
+      const interval = SEA_REBUILD_INTERVAL_MS
       const elapsed = performance.now() - lastSeaRebuildAt
       if (elapsed >= interval) {
         if (pendingSeaRebuild) {
@@ -813,7 +900,7 @@ export async function createOcean(
           pendingSeaRebuild = undefined
         }
         lastSeaRebuildAt = performance.now()
-        rebuildSea(segments)
+        rebuildSea(baseCell, ringCount)
         return
       }
       if (pendingSeaRebuild) clearTimeout(pendingSeaRebuild)
@@ -821,20 +908,23 @@ export async function createOcean(
         () => {
           pendingSeaRebuild = undefined
           lastSeaRebuildAt = performance.now()
-          if (!disposed) rebuildSea(segments)
+          if (!disposed) rebuildSea(baseCell, ringCount)
         },
         Math.max(0, interval - elapsed),
       )
     }
 
     const applySeaResolution = (next: OceanSettings, first: boolean) => {
-      const segments = clampSeaSegments(next.facetResolution)
+      // 范围由 seaExtent 固定；facetCellSize 只影响需要几环。
+      const layout = seaRingLayout(next.seaExtent, next.facetCellSize)
+      const { baseCell, ringCount } = layout
+      ocean.setFloat('seaHalfExtent', layout.radius)
       if (first) {
-        rebuildSea(segments)
+        rebuildSea(baseCell, ringCount)
         lastSeaRebuildAt = performance.now()
         return
       }
-      scheduleSeaRebuild(segments)
+      scheduleSeaRebuild(baseCell, ringCount)
     }
 
     const apply = (next: OceanSettings, first = false) => {
@@ -849,7 +939,7 @@ export async function createOcean(
       hemi.intensity = 0.72 * next.envIntensity
       sun.intensity = 1.22 * next.lightIntensity
       applySeaResolution(next, first)
-      sea.position.y = next.seaLevel
+      sea.forEach((mesh) => (mesh.position.y = next.seaLevel))
       wake.mesh.position.y = next.seaLevel
       ocean.wireframe = next.wireframe
       wake.mesh.setEnabled(next.wakeEnabled)
@@ -909,6 +999,8 @@ export async function createOcean(
       ocean.setColor3('sssColor', linearColor(next.sssColor))
       ocean.setColor3('fogColor', linearColor(next.fogColor))
       ocean.setFloat('facetStrength', next.facetStrength)
+      ocean.setFloat('facetFadeStart', next.facetFadeStart)
+      ocean.setFloat('facetFadeEnd', next.facetFadeEnd)
       ocean.setFloat('facetJitter', next.facetJitter)
       ocean.setFloat('shadingContrast', next.shadingContrast)
       ocean.setFloat('shadingBias', next.shadingBias)
@@ -924,7 +1016,6 @@ export async function createOcean(
       ocean.setFloat('turbidity', next.turbidity)
       ocean.setFloat('rayleigh', next.rayleigh)
       ocean.setFloat('mie', next.mie)
-      ocean.setFloat('seaHalfExtent', SEA_EXTENT / 2)
       ocean.setFloat('heightColorStrength', next.heightColorStrength)
       ocean.setFloat('heightColorBias', next.heightColorBias)
       ocean.setFloat('slopeColorStrength', next.slopeColorStrength)

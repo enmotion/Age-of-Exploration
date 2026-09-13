@@ -121,20 +121,23 @@ vec3 skyBaseColor(vec3 d, float turbidity, float rayleigh, float mie, float nigh
 export const oceanVertex = /* glsl */ `
 precision highp float;
 attribute vec3 position;
+// 每环一个面片边长，用顶点属性传入，避免为每个环复制一份材质。
+attribute float ringCellSize;
 uniform mat4 worldViewProjection;
 uniform mat4 world;
 uniform float time;
-uniform float cellSize;
 uniform float facetJitter;
 varying vec3 vWorld;
 varying float vHeight;
 varying vec3 vCrests;
 varying vec2 vBase;
 varying float vFold;
+varying float vCellSize;
 ${oceanWaveFunctions}
 void main() {
   vec2 base = position.xz;
-  vec2 lattice = base / max(0.001, cellSize);
+  float cellSize = max(0.001, ringCellSize);
+  vec2 lattice = base / cellSize;
   // 只抖动渲染位置；base 保持规则格点，因此片元里 floor(vBase / cellSize)
   // 与真实面片逐一对应，面片 ID 不会错位。
   vec2 offset = (vec2(oceanHash(lattice), oceanHash(lattice + 37.13)) - 0.5) * facetJitter * cellSize;
@@ -146,6 +149,7 @@ void main() {
   vHeight = displacement.y;
   vCrests = crests;
   vBase = base;
+  vCellSize = cellSize;
   // 折叠度在未变形的格点上求值：雅可比描述的是"平面 → 位移后曲面"这个映射的压缩程度。
   // 传入的是时间累积后的值（含衰减历史），白沫因此会残留。
   vFold = evaluateFoamFold(base);
@@ -160,6 +164,7 @@ varying float vHeight;
 varying vec3 vCrests;
 varying vec2 vBase;
 varying float vFold;
+varying float vCellSize;
 uniform vec3 cameraPosition;
 uniform vec3 sunDirection;
 uniform vec3 deepColor;
@@ -178,8 +183,9 @@ uniform float contactFoam;
 uniform float foamContact;
 uniform vec3 fogColor;
 uniform float time;
-uniform float cellSize;
 uniform float facetStrength;
+uniform float facetFadeStart;
+uniform float facetFadeEnd;
 uniform float shadingContrast;
 uniform float shadingBias;
 uniform float toneSteps;
@@ -254,7 +260,7 @@ void main() {
   // 面片 ID：把未变形的格点坐标量化成格号，逐面片得到稳定随机值。
   // 格号只取决于面片在地面网格里的位置，与浪高、时间无关，所以不会闪。
   // hash 必须与顶点着色器的 oceanHash、CPU 端 seaCellHash 保持同一公式。
-  vec2 facetCell = floor(vBase / max(0.001, cellSize));
+  vec2 facetCell = floor(vBase / max(0.001, vCellSize));
   float facetId = hash(facetCell);
 
   float heightMask = clamp(vHeight*heightColorStrength+heightColorBias,0.0,1.0);
@@ -272,7 +278,10 @@ void main() {
   water += crestColor*lighting*lightColorStrength;
 
   // 逐面片明度差异：相邻面片明度跳变，是低多边形面片读感的主要来源。
-  water *= 1.0 + (facetId - .5) * facetStrength * .36;
+  // 面片效果按距离淡出：远处面片在屏幕上只有几像素，逐面片抖分会变成噪点。
+  float facetViewDistance = distance(cameraPosition, vWorld);
+  float facetFade = 1.0 - smoothstep(facetFadeStart, max(facetFadeStart + 1.0, facetFadeEnd), facetViewDistance);
+  water *= 1.0 + (facetId - .5) * facetStrength * .36 * facetFade;
 
   vec3 viewDir=normalize(cameraPosition-vWorld);
   // 昼夜色调与天空着色器用同一套判据，否则水面与天空的色温会对不上。
@@ -346,10 +355,10 @@ void main() {
   float foamBand=foamSignal*(.8+hash(facetCell+19.7)*.4)*organic;
   float blocky=smoothstep(foamBreakup,foamBreakup+max(.02,foamEdgeSoftness),foamBand);
   // 碎晶白点：再用细一档的量化格撒小块，尺度由面片尺寸决定，远处不会糊成一片。
-  vec2 shardCell=floor(vBase/max(.001,cellSize*.32));
+  vec2 shardCell=floor(vBase/max(.001,vCellSize*.32));
   float shards=step(.9-hash(shardCell)*.26,max(foamSignal,0.0))*(.3+.7*step(.14,foamSignal));
   float foam=(blocky+shards*.4)*foamAmount*crestFoam;
-  float dist=distance(cameraPosition,vWorld);
+  float dist=facetViewDistance;
   foam*=1.0-smoothstep(foamFadeStart,foamFadeEnd,dist);
   // 白沫是自发的漫反射白体：受光面趋近纯白，背光面只是略冷略暗。
   // 不能像水面那样按面法线压暗，否则倾斜浪脊上的白沫会变成土黄色块。

@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { OceanControl } from './oceanControls'
+import type { OceanSettings } from '../domain/ocean'
 
 const props = defineProps<{
   control: OceanControl
   value: string | number | boolean
   defaultValue: string | number | boolean
   context: string
+  settings: OceanSettings
 }>()
 
 const emit = defineEmits<{
@@ -18,7 +20,9 @@ const bounded = computed(
   () => props.control.min !== undefined && props.control.max !== undefined,
 )
 const fullLabel = computed(() => `${props.context} · ${props.control.label}`)
-const summary = computed(() => props.control.summary?.(props.value) ?? '')
+const summary = computed(
+  () => props.control.summary?.(props.value, props.settings) ?? '',
+)
 
 function constraintText() {
   if (props.control.type === 'check') return '开 / 关'

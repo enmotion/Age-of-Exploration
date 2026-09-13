@@ -1,3 +1,4 @@
+import { seaRingLayout } from '../domain/ocean'
 import type { OceanSettings } from '../domain/ocean'
 
 export type OceanControl = {
@@ -13,7 +14,14 @@ export type OceanControl = {
   disabled?: boolean
   hint?: string
   /** 依据当前取值派生的展示文本，用于把参数换算成直观数量。 */
-  summary?: (value: string | number | boolean) => string
+  /**
+   * 控件的实时说明。第二个参数是全部当前设置——因为有些值（比如"近处面片边长"
+   * 对应几环）必须结合别的设置才能算出来。
+   */
+  summary?: (
+    value: string | number | boolean,
+    settings: OceanSettings,
+  ) => string
 }
 
 export type OceanControlGroup = {
@@ -49,7 +57,8 @@ const bounded = (
   min: number,
   max: number,
   step = 0.01,
-): OceanControl => number(key, label, { min, max, step })
+  extra: Partial<OceanControl> = {},
+): OceanControl => number(key, label, { min, max, step, ...extra })
 
 const positive = (
   key: keyof OceanSettings,
@@ -76,20 +85,18 @@ export const oceanControlGroups: OceanControlGroup[] = [
     title: '海面网格',
     description: '海面几何密度：细分越高，面片越多越小',
     controls: [
-      number('facetResolution', '网格细分（每边）', {
-        min: 24,
-        max: 512,
-        step: 1,
-        integer: true,
-        hint: '海面平面固定为 700 × 700 米。面片总数 = 细分²，单个面片边长 = 700 ÷ 细分（米）。改动会重建网格。',
-        summary: (value) => {
-          const segments = Number(value)
-          if (!Number.isFinite(segments) || segments <= 0) return ''
-          const facets = segments * segments
-          const vertices = (segments + 1) * (segments + 1)
-          return `${facets.toLocaleString('zh-CN')} 个面片 · ${vertices.toLocaleString('zh-CN')} 个顶点 · 面片边长 ${(700 / segments).toFixed(2)} m`
+      bounded('facetCellSize', '近处面片边长 m', 0.5, 24, 0.5, {
+        summary: (value, settings) => {
+          const layout = seaRingLayout(
+            Number(settings.seaExtent),
+            Number(value),
+          )
+          return `→ 实际 ${layout.baseCell.toFixed(2)} m，${layout.ringCount} 环，覆盖 ${Math.round(layout.radius * 2)} m`
         },
       }),
+      bounded('seaExtent', '海面范围（直径）m', 512, 6144, 128),
+      bounded('facetFadeStart', '面片淡出起点 m', 0, 2000, 10),
+      bounded('facetFadeEnd', '面片淡出终点 m', 10, 4000, 10),
       bounded('facetJitter', '面片抖动', 0, 0.5, 0.01),
     ],
   },

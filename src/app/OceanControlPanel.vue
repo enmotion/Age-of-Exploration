@@ -228,6 +228,7 @@ function applyLightingPreset(preset: (typeof lightingPresets)[number]) {
             :value="values[control.key]"
             :default-value="defaults[control.key]"
             :context="group.title"
+            :settings="values"
             @update="update"
             @reset="emit('resetControl', $event)"
           />
@@ -272,6 +273,7 @@ function applyLightingPreset(preset: (typeof lightingPresets)[number]) {
                 :value="values[control.key]"
                 :default-value="defaults[control.key]"
                 :context="`${group.title} · ${child.title}`"
+                :settings="values"
                 @update="update"
                 @reset="emit('resetControl', $event)"
               />

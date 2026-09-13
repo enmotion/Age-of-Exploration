@@ -1,3 +1,27 @@
+/** 同心环 LOD：每环每边的格数。 */
+export const SEA_RING_SEGMENTS = 128
+/** 环数上限。每多一环，范围翻倍、顶点数增加约 12k。 */
+export const SEA_RING_COUNT_MAX = 6
+
+/**
+ * 由「海面范围（直径）+ 近处面片边长」解出环布局。
+ *
+ * 关键：**范围是固定的**。改变近处面片边长只会改变需要几环（细节如何分配），
+ * 绝不会改变海面的覆盖面积——面积曾经被近处面片边长放大，那是设计错误。
+ *
+ * 环边界必须落在 (SEA_RING_SEGMENTS/2)×cell×2^i 这条阶梯上（相邻环顶点要嵌套），
+ * 所以实际面片边长会被吸附到该阶梯，且只会比请求值更细、不会更粗。
+ */
+export function seaRingLayout(extent: number, nearCell: number) {
+  const radius = Math.max(64, extent / 2)
+  const requested = Math.max(0.25, nearCell)
+  const half = SEA_RING_SEGMENTS / 2
+  const levels = Math.ceil(Math.log2(radius / half / requested)) + 1
+  const ringCount = Math.min(SEA_RING_COUNT_MAX, Math.max(1, levels))
+  const baseCell = radius / (half * 2 ** (ringCount - 1))
+  return { ringCount, baseCell, radius: half * baseCell * 2 ** (ringCount - 1) }
+}
+
 export interface OceanSettings {
   resolution: string
   stylized: boolean
@@ -64,10 +88,11 @@ export interface OceanSettings {
 
   seaLevel: number
   /**
-   * 海面网格每边的细分段数（顶点数 = (值 + 1)²，面片数 = 值²）。
-   * 海面平面固定为 700 × 700 米，因此单个面片边长 = 700 ÷ 该值。
+   * 最内环（近处）的面片边长，单位米。海面用同心环 LOD 覆盖。
+   * 它**只决定细节如何分配**（需要几环），不决定海面面积——面积由 `seaExtent` 固定。
+   * 因为环边界必须落在 64×cell×2^i 这条阶梯上，实际值会被吸附到不粗于请求值的档位。
    */
-  facetResolution: number
+  facetCellSize: number
   /**
    * 面片顶点在水平方向的抖动幅度（单位为格宽的比例）。
    * 0 = 规则格纹；0.3 ~ 0.4 得到参考图那种不规则碎面。过大时四边形会被压扁。
@@ -75,7 +100,8 @@ export interface OceanSettings {
   facetJitter: number
   lengthScale: number
   vertexDensity: number
-  clipLevels: number
+  /** 海面覆盖直径（米）。固定不变，与近处面片边长无关。 */
+  seaExtent: number
   skirtSize: number
   waveFadeStart: number
   waveFadeEnd: number
@@ -263,11 +289,11 @@ export const defaultOceanSettings: Readonly<OceanSettings> = {
   mediumFoam: 1,
   smallFoam: 0.5,
   seaLevel: 0,
-  facetResolution: 190,
+  facetCellSize: 3,
   facetJitter: 0.34,
   lengthScale: 15,
   vertexDensity: 30,
-  clipLevels: 8,
+  seaExtent: 1536,
   skirtSize: 10,
   waveFadeStart: 900,
   waveFadeEnd: 2200,
