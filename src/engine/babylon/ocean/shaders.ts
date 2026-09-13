@@ -104,7 +104,11 @@ vec3 skyRadiance(vec3 d, float turbidity, float rayleigh, float mie, float night
   vec3 horizon = mix(vec3(.50,.77,.91), vec3(1.0,.36,.10), sunset*.9);
   vec3 zenith = mix(vec3(.08,.38,.72), vec3(.52,.20,.28), sunset*.85);
   float gradPow = mix(.48,.7, clamp(turbidity/30.0,0.0,1.0)) * (1.0 - sunset*.4);
-  vec3 sky = mix(horizon, zenith, pow(clamp(d.y*.5+.5,0.0,1.0), gradPow));
+  // 按**仰角**参数化，而不是 d.y*0.5+0.5。
+  // 旧映射在地平线处给出 y=0.5 → pow(0.5,gradPow)≈0.68，也就是"地平线处已有 68% 是天顶色"，
+  // 低空整片几乎均匀——那条亮而浅的地平线雾带根本没被画出来，海天相接自然显得生硬。
+  // 新映射：地平线处 y=0 → 完全是地平线色；天顶处 y=1 → 完全是天顶色。
+  vec3 sky = mix(horizon, zenith, pow(clamp(d.y,0.0,1.0), gradPow));
   float haze = pow(1.0 - max(d.y,0.0), 5.0);
   sky = mix(sky, horizon, haze*.35);
   sky = mix(sky, vec3(.008,.025,.09), nightAmount*.94);
@@ -148,6 +152,7 @@ varying float vHeight;
 varying vec3 vCrests;
 varying vec2 vBase;
 varying float vFold;
+varying float vFaceFold;
 varying float vCellSize;
 ${oceanWaveFunctions}
 void main() {
@@ -166,6 +171,9 @@ void main() {
   vCrests = crests;
   vBase = base;
   vCellSize = cellSize;
+  // 面级折叠度：在**格心**求值，整格共用同一个数，高光选面时一个面才不会只亮一半。
+  // 只用瞬时值——高光关心的是"这一格现在有没有浪花"，不需要泡沫那套衰减历史。
+  vFaceFold = evaluateJacobianAt((floor(base / cellSize) + 0.5) * cellSize, time);
   // 折叠度在未变形的格点上求值：雅可比描述的是"平面 → 位移后曲面"这个映射的压缩程度。
   // 传入的是时间累积后的值（含衰减历史），白沫因此会残留。
   vFold = evaluateFoamFold(base);
@@ -180,6 +188,7 @@ varying float vHeight;
 varying vec3 vCrests;
 varying vec2 vBase;
 varying float vFold;
+varying float vFaceFold;
 varying float vCellSize;
 uniform vec3 cameraPosition;
 uniform sampler2D sceneReflection;
@@ -187,6 +196,7 @@ uniform mat4 reflectionMatrix;
 uniform float seaLevel;
 uniform vec2 reflectionTexel;
 uniform vec3 moonDirection;
+uniform float moonVisible;
 uniform vec3 sunDirection;
 uniform vec3 deepColor;
 uniform vec3 midColor;
@@ -205,6 +215,10 @@ uniform float foamContact;
 uniform vec3 fogColor;
 uniform float time;
 uniform float facetStrength;
+uniform float edgeGlowStrength;
+uniform float edgeGlowWidth;
+uniform float vertexGlowStrength;
+uniform float glowSpread;
 uniform float facetFadeStart;
 uniform float facetFadeEnd;
 uniform float shadingContrast;
@@ -337,6 +351,29 @@ void main() {
   float facetFade = 1.0 - smoothstep(facetFadeStart, max(facetFadeStart + 1.0, facetFadeEnd), facetViewDistance);
   water *= 1.0 + (facetId - .5) * facetStrength * .36 * facetFade;
 
+  // ---- 棱边与顶点高光（风格化点缀）----
+  // 不需要额外几何或顶点属性：三角化方式是已知的——每格是"两条格边 + 一条对角线"，
+  // 对角线方向由格号哈希决定（与 CPU 建网格时的 seaCellHash 同式同格号）。
+  vec2 cellScale = vBase / max(0.001, vCellSize);
+  vec2 cellUV = fract(cellScale);
+  vec2 cellIdx = cellScale - cellUV;
+  float diagFlip = hash(cellIdx);
+  float dAxis = min(min(cellUV.x, 1.0 - cellUV.x), min(cellUV.y, 1.0 - cellUV.y));
+  float dDiag = (diagFlip > 0.5 ? abs(cellUV.x - cellUV.y) : abs(cellUV.x + cellUV.y - 1.0)) * 0.7071;
+  float triEdge = 1.0 - smoothstep(0.0, max(0.002, edgeGlowWidth), min(dAxis, dDiag));
+  // 选面：**有浪花的面才亮**，不是随机抽面。
+  // 用面级折叠度（整格一个值）算泡沫信号，与可见白沫同一套公式，所以高光一定贴着浪花。
+  // 注意信号是**有符号**的：>0 在浪花里、<0 在浪花外，扩散量就是向外走的距离。
+  float faceFoamSignal = (foamFoldBias - vFaceFold) * foamFoldScale;
+  // 由浪花向外扩散：浪花内为满值，出了浪花按扩散量羽化衰减。
+  float glowMask = clamp(faceFoamSignal + glowSpread, 0.0, 1.0)
+                 * exp(-max(-faceFoamSignal, 0.0) / max(0.05, glowSpread * 2.5));
+  // 顶点：取格子四角，整格共用
+  float cornerProx = 1.0 - smoothstep(0.0, max(0.004, edgeGlowWidth * 2.4), length(min(cellUV, 1.0 - cellUV)));
+  float glow = triEdge * edgeGlowStrength + cornerProx * vertexGlowStrength;
+  // 远处面片只有几像素，跟着 facetFade 一起淡出，避免变成噪点
+  water += mix(crestColor, vec3(0.72, 0.94, 1.0), 0.6) * glow * glowMask * facetFade;
+
   vec3 viewDir=normalize(cameraPosition-vWorld);
   // 昼夜色调与天空着色器用同一套判据，否则水面与天空的色温会对不上。
   // sunDirection 是光线传播方向，所以太阳高度是它的 -y。
@@ -353,7 +390,11 @@ void main() {
   water=mix(water,vec3(.16,.26,.46),nightAmount*.55);
 
   // Let real wave faces lead. Two rotated, elongated slope fields only break edges.
-  float frequency=.10+glintScale*.22;
+  // 碎金的**空间频率**。原来的 .10+glintScale*.22 最高只到 0.32（特征 3.1 m），
+  // 而面片本身是 3~12 m——两者同一量级，所以涟漪只能形成大尺度平滑起伏，
+  // 画面就是"宽而软的棉絮带"，而不是细碎闪光。面板当时根本够不到有用区间。
+  // 现在覆盖 0.20~2.65（特征 5 m~0.38 m），远处仍由下面的足迹过滤防走样。
+  float frequency=.15+glintScale*2.5;
   vec2 pixelDx=dFdx(vWorld.xz),pixelDy=dFdy(vWorld.xz);
   float footprint=max(length(pixelDx),length(pixelDy));
   float resolved=1.0-smoothstep(.18,.85,footprint*frequency);
@@ -390,7 +431,9 @@ void main() {
 
   float alpha=clamp(sqrt(2.0/(highlightSharpness+2.0))*(.65+roughness),.055,.5);
   float sunVisible=smoothstep(-.025,.06,sunElevation);
-  float moonVisible=smoothstep(.2,.95,nightAmount);
+  // 月亮的可见度由 CPU 统一给出：圆盘与水面光路必须用**同一个**门控，
+  // 否则会出现"天上没有月亮、水里却有月亮光路"——两条光路一个天体，看着就是两个太阳。
+  // 原来这里用 smoothstep(.2,.95,nightAmount)，黄昏时已有 0.115，月亮光路提前出现。
   float sunSpec=waterSpecular(reflectionNormal,viewDir,normalize(-sunDirection),alpha,specularVariance);
   float moonSpec=waterSpecular(reflectionNormal,viewDir,normalize(moonDirection),alpha*.75,specularVariance);
   float response=exp2(-glintThreshold*1.5);
@@ -462,10 +505,11 @@ void main() {
   // 只调雾色是不够的：雾在平面边缘也到不了 100%，而且雾色与天空地平线色本来就不同，
   // 结果就是一条硬边。这里用与天空着色器**完全相同**的公式算出地平线色，
   // 再按"视线是否接近水平"把它混上去，接缝因此彻底消失，且与海面尺寸无关。
-  float skySunset=1.0-smoothstep(.04,.24,sunElevation);
-  vec3 horizonColor=mix(vec3(.50,.77,.91),vec3(1.0,.36,.10),skySunset*.9);
-  horizonColor=mix(horizonColor,vec3(.008,.025,.09),nightAmount*.94);
-  horizonColor=pow(clamp(horizonColor*skyLuminance,0.0,1.0),vec3(.92));
+  // 用与天空着色器**完全相同**的共享实现 skyBaseColor 算地平线方向上的天空色。
+  // 手写近似会漏掉三样东西：d.y=0 处的天顶渐变、地平线霞光项、以及 rayleigh 缩放——
+  // 结果偏亮，两边对不上就是那条接缝。
+  vec3 horizonDir=normalize(vec3(viewDir.x,0.0,viewDir.z)+vec3(1e-5,0.0,1e-5));
+  vec3 horizonColor=pow(clamp(skyBaseColor(horizonDir,turbidity,rayleigh,mie,nightAmount)*skyLuminance,0.0,1.0),vec3(.92));
   // 渐隐范围跟着"到海面平面边界的距离"自适应：
   // 在到达边界之前就把水面完全变成天空色，这样平面边缘本身落在已经虚化完的区域里，
   // 接缝因此不可见——而且相机升高、朝向改变时都成立（固定的 viewDir 阈值做不到这点）。

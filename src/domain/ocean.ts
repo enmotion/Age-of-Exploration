@@ -105,6 +105,17 @@ export interface OceanSettings {
   skirtSize: number
   waveFadeStart: number
   waveFadeEnd: number
+  /** 棱边高光强度。0 = 关闭。 */
+  edgeGlowStrength: number
+  /** 棱边高光宽度（格内单位，1 = 一整个格子）。 */
+  edgeGlowWidth: number
+  /** 顶点高光强度。0 = 关闭。 */
+  vertexGlowStrength: number
+  /**
+   * 浪花向外扩散量。0 = 高光只覆盖有浪花的面；越大越向外羽化。
+   * 它是在泡沫信号上叠加的偏置，所以选面始终由浪花决定，不是随机抽面。
+   */
+  glowSpread: number
   facetFadeStart: number
   facetFadeEnd: number
   normalFadeStart: number
@@ -297,6 +308,10 @@ export const defaultOceanSettings: Readonly<OceanSettings> = {
   skirtSize: 10,
   waveFadeStart: 900,
   waveFadeEnd: 2200,
+  edgeGlowStrength: 0.55,
+  edgeGlowWidth: 0.05,
+  vertexGlowStrength: 0.4,
+  glowSpread: 0.35,
   facetFadeStart: 140,
   facetFadeEnd: 700,
   normalFadeStart: 220,
@@ -310,7 +325,7 @@ export const defaultOceanSettings: Readonly<OceanSettings> = {
   crestColor: '#2b93b4',
   shallowColor: '#57c7c2',
   deepColor: '#032d4b',
-  facetStrength: 0.7,
+  facetStrength: 0.5,
   detailNormalStrength: 1,
   normalScaleX: 1,
   normalScaleZ: 1,
@@ -342,7 +357,12 @@ export const defaultOceanSettings: Readonly<OceanSettings> = {
   fresnelStrength: 1,
   fresnelBias: 0,
   highlightColor: '#ffe6ba',
-  highlightStrength: 0.7,
+  /**
+   * 高光强度。原值 0.7 会把太阳光路整片压到纯白（接近纯白的像素占水面 2.59%，
+   * 而参考图只有 0.28%），大面积过曝反而吃掉面片之间的层次。
+   * 0.30 时纯白降到 0.51%，接近参考图量级。
+   */
+  highlightStrength: 0.3,
   highlightSharpness: 46,
   glintScale: 0.4,
   glintAspect: 4,

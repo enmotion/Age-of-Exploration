@@ -115,7 +115,10 @@ function createSeaRing(
       const c = col + 1 + (row + 1) * side
       const d = col + (row + 1) * side
       // 每个格子的对角线方向按格号随机翻转，破坏规则格纹带来的对称感。
-      if (seaCellHash(col + ring * 977, row + ring * 613) > 0.5) {
+      // 必须用**全局格号**（col - segments/2 就是世界格号）：片元里算棱边/顶点高光时
+      // 用的是 hash(floor(vBase/vCellSize))，两边格号一致才能对上。
+      // 各环格子尺寸不同，格号本来就落在不同格点上，天然去相关，不需要再加环偏移。
+      if (seaCellHash(col - segments / 2, row - segments / 2) > 0.5) {
         indices.push(a, b, d, b, c, d)
       } else {
         indices.push(a, b, c, a, c, d)
@@ -759,6 +762,7 @@ export async function createOcean(
       'cameraPosition',
       'sunDirection',
       'moonDirection',
+      'moonVisible',
       'reflectionMatrix',
       'seaLevel',
       'reflectionTexel',
@@ -773,6 +777,10 @@ export async function createOcean(
       'fogColor',
       'cellSize',
       'facetStrength',
+      'edgeGlowStrength',
+      'edgeGlowWidth',
+      'vertexGlowStrength',
+      'glowSpread',
       'facetFadeStart',
       'facetFadeEnd',
       'facetJitter',
@@ -988,7 +996,21 @@ export async function createOcean(
         .addInPlace(sunPosition.scale(420))
       const nightAmount =
         1 - BABYLON.Scalar.Clamp((sunPosition.y + 0.08) / 0.28, 0, 1)
-      moonDisc.setEnabled(nightAmount > 0.15)
+      // 月亮只在太阳落到地平线以下之后才出现，并且圆盘与水面光路共用这一个可见度。
+      // 之前两者门控不同（圆盘 nightAmount>0.15，光路 smoothstep(.2,.95,nightAmount)），
+      // 黄昏时会"天上没月亮、水里却有月亮光路"，看起来像第二个太阳。
+      const moonVisibility = BABYLON.Scalar.Clamp(
+        (-0.02 - sunPosition.y) / 0.06,
+        0,
+        1,
+      )
+      moonDisc.setEnabled(moonVisibility > 0.001)
+      moonDiscMaterial.emissiveColor.set(
+        0.82 * moonVisibility,
+        0.9 * moonVisibility,
+        1.3 * moonVisibility,
+      )
+      ocean.setFloat('moonVisible', moonVisibility)
       moonDisc.position
         .copyFrom(camera.position)
         .addInPlace(
@@ -1028,6 +1050,10 @@ export async function createOcean(
       ocean.setColor3('sssColor', linearColor(next.sssColor))
       ocean.setColor3('fogColor', linearColor(next.fogColor))
       ocean.setFloat('facetStrength', next.facetStrength)
+      ocean.setFloat('edgeGlowStrength', next.edgeGlowStrength)
+      ocean.setFloat('edgeGlowWidth', next.edgeGlowWidth)
+      ocean.setFloat('vertexGlowStrength', next.vertexGlowStrength)
+      ocean.setFloat('glowSpread', next.glowSpread)
       ocean.setFloat('facetFadeStart', next.facetFadeStart)
       ocean.setFloat('facetFadeEnd', next.facetFadeEnd)
       ocean.setFloat('facetJitter', next.facetJitter)
